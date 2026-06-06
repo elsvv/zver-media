@@ -726,16 +726,20 @@ final class PlayerEngine: ObservableObject {
         // 3. Пересбор графа: engine.disconnectNodeOutput(player)
         //    engine.connect(player, to: engine.mainMixerNode,
         //                   format: file.processingFormat)
-        // 4. player.scheduleFile(file, at: nil) { [weak self] in
+        // 4. player.scheduleFile(file, at: nil,
+        //                        completionCallbackType: .dataPlayedBack) { [weak self] _ in
         //        Task { @MainActor in self?.handleTrackFinished() }   // → next()
         //    }
+        //    Обязательно .dataPlayedBack: legacy-completion срабатывает при
+        //    ПОТРЕБЛЕНИИ данных нодой, до проигрывания хвоста — stop() в next()
+        //    обрезал бы конец трека.
         // 5. engine.prepare(); try engine.start(); player.play(); state = .playing
         // 6. Таймер 0.5с обновляет currentTime из player.lastRenderTime
         //    (playerTime(forNodeTime:) + startFrame) / sampleRate
     }
 }
 ```
-Полные реализации методов написать по комментариям; обработать ошибки открытия файла (пропуск трека → next()). Completion-handler у `scheduleFile` вызывается и при ручном `player.stop()` — отличать «дослушан» от «остановлен» флагом `isSwitchingTracks`, иначе next() сработает при seek.
+Полные реализации методов написать по комментариям; обработать ошибки открытия файла (пропуск трека → next()). Completion-handler у `scheduleFile`/`scheduleSegment` (даже с `.dataPlayedBack`) вызывается и при ручном `player.stop()` — отличать «дослушан» от «остановлен» (generation-счётчик или флаг), иначе next() сработает при seek. После `try? engine.start()` в togglePlayPause/seek обязательно `guard engine.isRunning` перед `player.play()` — play() на незапущенном движке кидает NSException.
 
 **Step 3: Подключить к ContentView** временно: кнопка «Сканировать Documents» → `LibraryScanner.scan` → список треков → тап → `engine.play(tracks:startAt:)`. Собрать, запустить в симуляторе, закинуть фикстурный FLAC через drag-drop в окно симулятора (падает в Files) или `xcrun simctl addmedia` не подходит для аудио — проще: добавить в Documents через `xcrun simctl get_app_container booted dev.zver.ZverIOS data` и `cp` в `Documents/`.
 

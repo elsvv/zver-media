@@ -17,10 +17,10 @@ final class PlayerEngine: ObservableObject {
     private var timeObserver: Timer?
     private let session: AudioSessionControlling
 
-    /// Completion-handler scheduleFile/scheduleSegment вызывается и при ручном
-    /// player.stop(). Поколение инкрементируется перед каждым stop/новой
-    /// загрузкой — устаревший completion игнорируется, next() срабатывает
-    /// только когда трек действительно дослушан.
+    /// Completion-handler scheduleFile/scheduleSegment (даже с .dataPlayedBack)
+    /// вызывается и при ручном player.stop(). Поколение инкрементируется перед
+    /// каждым stop/новой загрузкой — устаревший completion игнорируется, next()
+    /// срабатывает только когда трек действительно дослушан.
     private var generation = 0
 
     init(session: AudioSessionControlling = SystemAudioSession()) {
@@ -47,6 +47,10 @@ final class PlayerEngine: ObservableObject {
             if !engine.isRunning {
                 try? engine.start()
             }
+            // player.play() на незапущенном движке кидает NSException —
+            // если движок не стартовал (например, прерывание сессии),
+            // остаёмся в .paused.
+            guard engine.isRunning else { return }
             player.play()
             state = .playing
         case .idle:
@@ -87,12 +91,19 @@ final class PlayerEngine: ObservableObject {
         currentTime = Double(clampedFrame) / sampleRate
 
         player.scheduleSegment(file, startingFrame: clampedFrame,
-                               frameCount: remainingFrames, at: nil) { [weak self] in
+                               frameCount: remainingFrames, at: nil,
+                               completionCallbackType: .dataPlayedBack) { [weak self] _ in
             Task { @MainActor in self?.handleTrackFinished(generation: gen) }
         }
         if wasPlaying {
             if !engine.isRunning {
                 try? engine.start()
+            }
+            // player.play() на незапущенном движке кидает NSException —
+            // при неудачном старте остаёмся на новой позиции в паузе.
+            guard engine.isRunning else {
+                state = .paused
+                return
             }
             player.play()
         }
@@ -125,8 +136,11 @@ final class PlayerEngine: ObservableObject {
         engine.disconnectNodeOutput(player)
         engine.connect(player, to: engine.mainMixerNode, format: loadedFile.processingFormat)
 
-        // 4. Запланировать файл; completion → следующий трек.
-        player.scheduleFile(loadedFile, at: nil) { [weak self] in
+        // 4. Запланировать файл; completion (.dataPlayedBack — после фактического
+        //    проигрывания хвоста через выход, а не после потребления данных нодой,
+        //    иначе stop() в next() обрезает конец трека) → следующий трек.
+        player.scheduleFile(loadedFile, at: nil,
+                            completionCallbackType: .dataPlayedBack) { [weak self] _ in
             Task { @MainActor in self?.handleTrackFinished(generation: gen) }
         }
 
