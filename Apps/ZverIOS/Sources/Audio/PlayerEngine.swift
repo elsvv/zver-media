@@ -16,6 +16,7 @@ final class PlayerEngine: ObservableObject {
     private var startFrame: AVAudioFramePosition = 0
     private var timeObserver: Timer?
     private let session: AudioSessionControlling
+    private let nowPlaying = NowPlayingService()
 
     /// Completion-handler scheduleFile/scheduleSegment (даже с .dataPlayedBack)
     /// вызывается и при ручном player.stop(). Поколение инкрементируется перед
@@ -27,6 +28,7 @@ final class PlayerEngine: ObservableObject {
         self.session = session
         engine.attach(player)
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
+        nowPlaying.wire(to: self)
     }
 
     func play(tracks: [Track], startAt index: Int) {
@@ -40,22 +42,31 @@ final class PlayerEngine: ObservableObject {
 
     func togglePlayPause() {
         switch state {
-        case .playing:
-            player.pause()
-            state = .paused
-        case .paused:
-            if !engine.isRunning {
-                try? engine.start()
-            }
-            // player.play() на незапущенном движке кидает NSException —
-            // если движок не стартовал (например, прерывание сессии),
-            // остаёмся в .paused.
-            guard engine.isRunning else { return }
-            player.play()
-            state = .playing
-        case .idle:
-            break
+        case .playing: pause()
+        case .paused: resume()
+        case .idle: break
         }
+    }
+
+    func pause() {
+        guard state == .playing else { return }
+        player.pause()
+        state = .paused
+        updateNowPlaying()
+    }
+
+    func resume() {
+        guard state == .paused else { return }
+        if !engine.isRunning {
+            try? engine.start()
+        }
+        // player.play() на незапущенном движке кидает NSException —
+        // если движок не стартовал (например, прерывание сессии),
+        // остаёмся в .paused.
+        guard engine.isRunning else { return }
+        player.play()
+        state = .playing
+        updateNowPlaying()
     }
 
     func next() {
@@ -81,6 +92,7 @@ final class PlayerEngine: ObservableObject {
         let clampedFrame = min(max(targetFrame, 0), max(file.length - 1, 0))
         let remainingFrames = AVAudioFrameCount(file.length - clampedFrame)
         guard remainingFrames > 0 else { return }
+        defer { updateNowPlaying() }
 
         generation &+= 1
         let gen = generation
@@ -154,6 +166,7 @@ final class PlayerEngine: ObservableObject {
         }
         player.play()
         state = .playing
+        updateNowPlaying()
 
         // 6. Таймер позиции.
         startTimeObserver()
@@ -174,6 +187,14 @@ final class PlayerEngine: ObservableObject {
         timeObserver = nil
         currentTime = 0
         state = .idle
+        nowPlaying.clear()
+    }
+
+    private func updateNowPlaying() {
+        guard let track = queue.current else { return }
+        // Артворк появится в Task 12 — пока nil.
+        nowPlaying.update(track: track, artwork: nil,
+                          currentTime: currentTime, isPlaying: state == .playing)
     }
 
     private func startTimeObserver() {
