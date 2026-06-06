@@ -20,7 +20,10 @@ struct PlayerScreen: View {
                 content(for: track)
                     .task(id: track.id) {
                         artwork = nil
-                        artwork = await engine.artworkLoader.artwork(for: track)
+                        let image = await engine.artworkLoader.artwork(for: track)
+                        // Отменённая задача (смена трека) не должна перетирать артворк:
+                        // её continuation всё равно выполняется после await.
+                        if !Task.isCancelled { artwork = image }
                     }
             }
         }
