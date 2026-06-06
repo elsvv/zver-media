@@ -38,6 +38,15 @@ final class PlayerEngine: ObservableObject {
     /// устройства — пересобрать при следующем воспроизведении.
     private var needsGraphRebuild = false
 
+    /// Был ли на выходе внешний приёмник (ЦАП/наушники/BT) на момент последней
+    /// сборки графа или route change. Порядок configurationChange и
+    /// routeChange(.oldDeviceUnavailable) не документирован: если первым придёт
+    /// configurationChange, state ещё .playing, и авто-резюм успел бы заиграть
+    /// в динамик до pause() из handleRouteChange. Снимок маршрута отличает
+    /// «выдернули устройство, звук упал на динамик» (играть нельзя) от смены
+    /// конфигурации самого динамика (продолжаем).
+    private var wasOnExternalOutput = false
+
     init(session: AudioSessionControlling = SystemAudioSession()) {
         self.session = session
         engine.attach(player)
@@ -85,6 +94,7 @@ final class PlayerEngine: ObservableObject {
         default:
             break
         }
+        wasOnExternalOutput = Self.routeHasExternalOutput()
     }
 
     private func handleInterruption(_ type: AVAudioSession.InterruptionType,
@@ -109,7 +119,21 @@ final class PlayerEngine: ObservableObject {
         // пересобираем граф и продолжаем с текущей позиции, если играли.
         guard file != nil else { return }
         needsGraphRebuild = false
+        // Выход упал с внешнего устройства на встроенный динамик — значит,
+        // устройство выдернули, а routeChange(.oldDeviceUnavailable) мог ещё
+        // не прийти (state ещё .playing). Пересобираем граф в паузе,
+        // возобновление за пользователем — никакого всплеска в динамик.
+        if wasOnExternalOutput, !Self.routeHasExternalOutput() {
+            pause()
+        }
         rebuildGraph(resumeFrom: currentTime, andPlay: state == .playing)
+    }
+
+    /// Есть ли в текущем маршруте вывод, отличный от встроенного динамика
+    /// (ЦАП, наушники, Bluetooth, AirPlay).
+    private static func routeHasExternalOutput() -> Bool {
+        AVAudioSession.sharedInstance().currentRoute.outputs
+            .contains { $0.portType != .builtInSpeaker }
     }
 
     func play(tracks: [Track], startAt index: Int) {
@@ -224,6 +248,7 @@ final class PlayerEngine: ObservableObject {
         _ = SampleRateCoordinator.prepare(session: session,
                                           fileRate: file.fileFormat.sampleRate)
         try? AVAudioSession.sharedInstance().setActive(true)
+        wasOnExternalOutput = Self.routeHasExternalOutput()
         engine.disconnectNodeOutput(player)
         engine.connect(player, to: engine.mainMixerNode, format: file.processingFormat)
         engine.prepare()
@@ -252,6 +277,7 @@ final class PlayerEngine: ObservableObject {
         _ = SampleRateCoordinator.prepare(session: session,
                                           fileRate: loadedFile.fileFormat.sampleRate)
         try? AVAudioSession.sharedInstance().setActive(true)
+        wasOnExternalOutput = Self.routeHasExternalOutput()
 
         // 3. Пересбор графа под формат файла.
         engine.disconnectNodeOutput(player)
