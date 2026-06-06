@@ -1,5 +1,6 @@
 import AVFAudio
 import Combine
+import UIKit
 import ZverCore
 
 @MainActor
@@ -17,6 +18,11 @@ final class PlayerEngine: ObservableObject {
     private var timeObserver: Timer?
     private let session: AudioSessionControlling
     private let nowPlaying = NowPlayingService()
+
+    /// Общий кэш обложек: им же пользуются MiniPlayerBar и PlayerScreen.
+    let artworkLoader = ArtworkLoader()
+    private var currentArtwork: UIImage?
+    private var artworkTask: Task<Void, Never>?
 
     /// Completion-handler scheduleFile/scheduleSegment (даже с .dataPlayedBack)
     /// вызывается и при ручном player.stop(). Поколение инкрементируется перед
@@ -167,9 +173,24 @@ final class PlayerEngine: ObservableObject {
         player.play()
         state = .playing
         updateNowPlaying()
+        refreshArtwork(for: track)
 
         // 6. Таймер позиции.
         startTimeObserver()
+    }
+
+    /// Артворк грузится асинхронно: Now Playing сначала обновляется без него,
+    /// после загрузки — повторно с картинкой (если трек не сменился).
+    private func refreshArtwork(for track: Track) {
+        artworkTask?.cancel()
+        currentArtwork = nil
+        artworkTask = Task { [weak self] in
+            guard let self else { return }
+            let image = await self.artworkLoader.artwork(for: track)
+            guard !Task.isCancelled, self.queue.current?.id == track.id else { return }
+            self.currentArtwork = image
+            self.updateNowPlaying()
+        }
     }
 
     private func handleTrackFinished(generation gen: Int) {
@@ -187,13 +208,15 @@ final class PlayerEngine: ObservableObject {
         timeObserver = nil
         currentTime = 0
         state = .idle
+        artworkTask?.cancel()
+        artworkTask = nil
+        currentArtwork = nil
         nowPlaying.clear()
     }
 
     private func updateNowPlaying() {
         guard let track = queue.current else { return }
-        // Артворк появится в Task 12 — пока nil.
-        nowPlaying.update(track: track, artwork: nil,
+        nowPlaying.update(track: track, artwork: currentArtwork,
                           currentTime: currentTime, isPlaying: state == .playing)
     }
 
