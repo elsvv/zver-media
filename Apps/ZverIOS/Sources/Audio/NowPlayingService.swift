@@ -98,8 +98,12 @@ final class NowPlayingService {
             MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? 1.0 : 0.0,
         ]
         if let artwork {
+            // @Sendable обязателен: иначе замыкание, созданное в @MainActor-методе,
+            // наследует изоляцию MainActor, а MediaPlayer вызывает requestHandler
+            // на своей фоновой accessQueue при сериализации Now Playing →
+            // dispatch_assert_queue_fail (SIGTRAP). UIImage иммутабелен и Sendable.
             info[MPMediaItemPropertyArtwork] =
-                MPMediaItemArtwork(boundsSize: artwork.size) { _ in artwork }
+                MPMediaItemArtwork(boundsSize: artwork.size) { @Sendable _ in artwork }
         }
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
     }

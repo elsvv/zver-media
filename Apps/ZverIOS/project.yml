@@ -32,3 +32,25 @@ targets:
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+  ZverIOSUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources: [UITests]
+    dependencies:
+      - target: ZverIOS
+    settings:
+      base:
+        SWIFT_VERSION: "6.0"
+        CODE_SIGN_STYLE: Automatic
+        GENERATE_INFOPLIST_FILE: YES
+schemes:
+  ZverIOS:
+    build:
+      targets:
+        ZverIOS: all
+        ZverIOSUITests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets: [ZverIOSUITests]
