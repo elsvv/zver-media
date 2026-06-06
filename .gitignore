@@ -1,0 +1,7 @@
+.DS_Store
+xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+.build/
+DerivedData/
+*.ipa
+Apps/ZverIOS/ZverIOS.xcodeproj
