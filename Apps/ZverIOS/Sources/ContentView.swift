@@ -1,43 +1,22 @@
 import SwiftUI
 import ZverCore
-import ZverMetadata
 
-/// Временная обвязка для ручной проверки PlayerEngine:
-/// скан Documents → список треков → тап → воспроизведение.
 struct ContentView: View {
     @StateObject private var engine = PlayerEngine()
-    @State private var tracks: [Track] = []
-    @State private var isScanning = false
+    @StateObject private var library = LibraryStore()
 
     var body: some View {
         NavigationStack {
-            List(Array(tracks.enumerated()), id: \.element.id) { index, track in
-                Button {
-                    engine.play(tracks: tracks, startAt: index)
-                } label: {
-                    VStack(alignment: .leading) {
-                        Text(track.title)
-                        Text(track.artist ?? "Неизвестный артист")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+            LibraryView(store: library, engine: engine)
+                .safeAreaInset(edge: .bottom) {
+                    if engine.state != .idle {
+                        playbackBar
                     }
                 }
-            }
-            .navigationTitle("Zver")
-            .toolbar {
-                Button(isScanning ? "Сканирую…" : "Сканировать") {
-                    Task { await scan() }
-                }
-                .disabled(isScanning)
-            }
-            .safeAreaInset(edge: .bottom) {
-                if engine.state != .idle {
-                    playbackBar
-                }
-            }
         }
     }
 
+    /// Временная панель управления — заменится на MiniPlayerBar в Task 12.
     private var playbackBar: some View {
         HStack(spacing: 24) {
             Text(engine.queue.current?.title ?? "")
@@ -53,25 +32,6 @@ struct ContentView: View {
         }
         .padding()
         .background(.thinMaterial)
-    }
-
-    private func scan() async {
-        isScanning = true
-        defer { isScanning = false }
-        let infos = (try? await LibraryScanner.scan(directory: URL.documentsDirectory)) ?? []
-        tracks = infos.map(makeTrack)
-    }
-
-    private func makeTrack(_ info: AudioFileInfo) -> Track {
-        Track(url: info.url,
-              title: info.title,
-              artist: info.artist,
-              album: info.album,
-              trackNumber: info.trackNumber,
-              year: info.year,
-              duration: info.duration,
-              sampleRate: info.sampleRate,
-              bitDepth: info.bitDepth)
     }
 
     private func formatTime(_ seconds: Double) -> String {
