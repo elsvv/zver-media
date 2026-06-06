@@ -763,16 +763,58 @@ import ZverCore
 
 @MainActor
 final class NowPlayingService {
+    // MPRemoteCommandCenter — глобальный синглтон: захватываем движок
+    // только weak, токены addTarget сохраняем и снимаем в unwire()/deinit,
+    // wire() идемпотентен (повторный вызов не плодит дубли обработчиков).
+    // @unchecked Sendable — nonisolated deinit в Swift 6 не может читать
+    // non-Sendable stored property; removeTarget зовём через хоп на MainActor.
+    private struct CommandRegistration: @unchecked Sendable {
+        let command: MPRemoteCommand
+        let token: Any
+    }
+    private var commandTargets: [CommandRegistration] = []
+
+    deinit {
+        let targets = commandTargets
+        guard !targets.isEmpty else { return }
+        Task { @MainActor in for r in targets { r.command.removeTarget(r.token) } }
+    }
+
     func wire(to engine: PlayerEngine) {
+        unwire()
         let cc = MPRemoteCommandCenter.shared()
-        cc.playCommand.addTarget { _ in engine.togglePlayPause(); return .success }
-        cc.pauseCommand.addTarget { _ in engine.togglePlayPause(); return .success }
-        cc.nextTrackCommand.addTarget { _ in engine.next(); return .success }
-        cc.previousTrackCommand.addTarget { _ in engine.previous(); return .success }
-        cc.changePlaybackPositionCommand.addTarget { e in
-            guard let e = e as? MPChangePlaybackPositionCommandEvent else { return .commandFailed }
-            engine.seek(to: e.positionTime); return .success
+        register(cc.playCommand) { [weak engine] _ in
+            guard let engine else { return .commandFailed }
+            engine.resume(); return .success
         }
+        register(cc.pauseCommand) { [weak engine] _ in
+            guard let engine else { return .commandFailed }
+            engine.pause(); return .success
+        }
+        register(cc.nextTrackCommand) { [weak engine] _ in
+            guard let engine else { return .commandFailed }
+            engine.next(); return .success
+        }
+        register(cc.previousTrackCommand) { [weak engine] _ in
+            guard let engine else { return .commandFailed }
+            engine.previous(); return .success
+        }
+        register(cc.changePlaybackPositionCommand) { [weak engine] e in
+            guard let engine,
+                  let e = e as? MPChangePlaybackPositionCommandEvent else { return .commandFailed }
+            let position = e.positionTime // e не Sendable — внутрь только Double
+            engine.seek(to: position); return .success
+        }
+    }
+
+    func unwire() {
+        for r in commandTargets { r.command.removeTarget(r.token) }
+        commandTargets.removeAll()
+    }
+
+    private func register(_ command: MPRemoteCommand,
+                          handler: @escaping @Sendable (MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus) {
+        commandTargets.append(.init(command: command, token: command.addTarget(handler: handler)))
     }
 
     func update(track: Track, artwork: UIImage?, currentTime: Double, isPlaying: Bool) {
@@ -792,7 +834,7 @@ final class NowPlayingService {
     }
 }
 ```
-Вызывать `update` при смене трека, play/pause и seek (НЕ каждые 0.5с — системе достаточно elapsed+rate, она экстраполирует).
+Вызывать `update` при смене трека, play/pause и seek (НЕ каждые 0.5с — системе достаточно elapsed+rate, она экстраполирует). Swift 6: addTarget-замыкания приходят на главном потоке, но без аннотации MainActor — вызовы движка оборачивать в `MainActor.assumeIsolated { ... }`; из не-Sendable события (`MPChangePlaybackPositionCommandEvent`) внутрь изолированного замыкания передавать только извлечённый `positionTime: Double`.
 
 **Step 2:** Билд → SUCCEEDED. **Step 3: Commit** — `feat: локскрин и системный пульт (MPNowPlaying/RemoteCommand)`
 
