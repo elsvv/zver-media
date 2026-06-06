@@ -32,6 +32,30 @@ xcodebuild -project Apps/ZverIOS/ZverIOS.xcodeproj -scheme ZverIOS \
   -destination "platform=iOS Simulator,name=iPhone SE (3rd generation)" build
 ```
 
+## Установка на iPhone
+
+1. Сгенерировать проект и открыть его в Xcode:
+
+   ```bash
+   cd Apps/ZverIOS && xcodegen generate
+   open ZverIOS.xcodeproj
+   ```
+
+2. В таргете ZverIOS → **Signing & Capabilities** выбрать **Personal Team**
+   (достаточно бесплатного Apple ID, добавляется в Xcode → Settings → Accounts).
+3. Подключить iPhone, выбрать его как destination и нажать **Run**.
+4. На телефоне разрешить запуск: **Settings → General → VPN & Device
+   Management** → доверять профилю разработчика.
+
+### Авто-переподпись через AltStore
+
+Профиль бесплатного Apple ID живёт 7 дней. Чтобы не переподписывать вручную,
+поставь [AltStore](https://altstore.io): AltServer на Маке продлевает профиль
+автоматически, пока iPhone и Мак в одной Wi-Fi сети. Ограничение free Apple ID —
+максимум 3 sideload-приложения одновременно.
+
+После установки пройди [чеклист ручной проверки](docs/manual-test-checklist.md).
+
 ## Тесты пакетов
 
 Пакеты — чистая логика, тестируются на macOS без симулятора:
