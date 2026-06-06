@@ -30,11 +30,86 @@ final class PlayerEngine: ObservableObject {
     /// срабатывает только когда трек действительно дослушан.
     private var generation = 0
 
+    /// Играли ли на момент начала прерывания (звонок, Siri) —
+    /// чтобы после .ended с .shouldResume продолжить только если играли.
+    private var wasPlayingBeforeInterruption = false
+
+    /// После .newDeviceAvailable граф остаётся собранным под частоту старого
+    /// устройства — пересобрать при следующем воспроизведении.
+    private var needsGraphRebuild = false
+
     init(session: AudioSessionControlling = SystemAudioSession()) {
         self.session = session
         engine.attach(player)
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
         nowPlaying.wire(to: self)
+        subscribeToSessionNotifications()
+    }
+
+    /// Реакции на системные события: выдернули ЦАП/наушники, звонок,
+    /// смена конфигурации движка. PlayerEngine живёт всё время жизни
+    /// приложения, блоки держат self слабо — токены подписок не храним.
+    private func subscribeToSessionNotifications() {
+        let center = NotificationCenter.default
+        let audioSession = AVAudioSession.sharedInstance()
+
+        _ = center.addObserver(forName: AVAudioSession.routeChangeNotification,
+                               object: audioSession, queue: .main) { [weak self] note in
+            guard let raw = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
+                  let reason = AVAudioSession.RouteChangeReason(rawValue: raw) else { return }
+            Task { @MainActor in self?.handleRouteChange(reason) }
+        }
+
+        _ = center.addObserver(forName: AVAudioSession.interruptionNotification,
+                               object: audioSession, queue: .main) { [weak self] note in
+            guard let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+                  let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
+            let optionsRaw = note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
+            let options = AVAudioSession.InterruptionOptions(rawValue: optionsRaw)
+            Task { @MainActor in self?.handleInterruption(type, options: options) }
+        }
+
+        _ = center.addObserver(forName: .AVAudioEngineConfigurationChange,
+                               object: engine, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.handleConfigurationChange() }
+        }
+    }
+
+    private func handleRouteChange(_ reason: AVAudioSession.RouteChangeReason) {
+        switch reason {
+        case .oldDeviceUnavailable:
+            // Выдернули ЦАП/наушники — не продолжаем играть в динамик.
+            pause()
+        case .newDeviceAvailable:
+            needsGraphRebuild = true
+        default:
+            break
+        }
+    }
+
+    private func handleInterruption(_ type: AVAudioSession.InterruptionType,
+                                    options: AVAudioSession.InterruptionOptions) {
+        switch type {
+        case .began:
+            wasPlayingBeforeInterruption = state == .playing
+            pause()
+        case .ended:
+            if wasPlayingBeforeInterruption, options.contains(.shouldResume) {
+                try? AVAudioSession.sharedInstance().setActive(true)
+                resume()
+            }
+            wasPlayingBeforeInterruption = false
+        @unknown default:
+            break
+        }
+    }
+
+    private func handleConfigurationChange() {
+        // Движок останавливает себя при смене частоты/каналов железа —
+        // пересобираем граф и продолжаем с текущей позиции, если играли.
+        guard file != nil else { return }
+        needsGraphRebuild = false
+        rebuildGraph(resumeFrom: currentTime, andPlay: state == .playing)
     }
 
     func play(tracks: [Track], startAt index: Int) {
@@ -63,6 +138,12 @@ final class PlayerEngine: ObservableObject {
 
     func resume() {
         guard state == .paused else { return }
+        if needsGraphRebuild {
+            // Появилось новое устройство вывода — собрать граф под его частоту.
+            needsGraphRebuild = false
+            rebuildGraph(resumeFrom: currentTime, andPlay: true)
+            return
+        }
         if !engine.isRunning {
             try? engine.start()
         }
@@ -92,6 +173,12 @@ final class PlayerEngine: ObservableObject {
     }
 
     func seek(to seconds: Double) {
+        reschedule(from: seconds, andPlay: state == .playing)
+    }
+
+    /// Останавливает плеер, заново планирует сегмент текущего файла с позиции
+    /// и (опционально) запускает воспроизведение. Общий путь seek и пересбора графа.
+    private func reschedule(from seconds: Double, andPlay shouldPlay: Bool) {
         guard let file else { return }
         let sampleRate = file.processingFormat.sampleRate
         let targetFrame = AVAudioFramePosition((seconds * sampleRate).rounded())
@@ -102,7 +189,6 @@ final class PlayerEngine: ObservableObject {
 
         generation &+= 1
         let gen = generation
-        let wasPlaying = state == .playing
 
         player.stop()
         startFrame = clampedFrame
@@ -113,7 +199,7 @@ final class PlayerEngine: ObservableObject {
                                completionCallbackType: .dataPlayedBack) { [weak self] _ in
             Task { @MainActor in self?.handleTrackFinished(generation: gen) }
         }
-        if wasPlaying {
+        if shouldPlay {
             if !engine.isRunning {
                 try? engine.start()
             }
@@ -124,7 +210,24 @@ final class PlayerEngine: ObservableObject {
                 return
             }
             player.play()
+            state = .playing
         }
+    }
+
+    /// Пересобирает аудиограф под текущий маршрут вывода (новый ЦАП, динамик)
+    /// и продолжает с указанной позиции.
+    private func rebuildGraph(resumeFrom seconds: Double, andPlay shouldPlay: Bool) {
+        guard let file else { return }
+        generation &+= 1
+        player.stop()
+        engine.stop()
+        _ = SampleRateCoordinator.prepare(session: session,
+                                          fileRate: file.fileFormat.sampleRate)
+        try? AVAudioSession.sharedInstance().setActive(true)
+        engine.disconnectNodeOutput(player)
+        engine.connect(player, to: engine.mainMixerNode, format: file.processingFormat)
+        engine.prepare()
+        reschedule(from: seconds, andPlay: shouldPlay)
     }
 
     private func loadAndPlay(_ track: Track) {
@@ -153,6 +256,7 @@ final class PlayerEngine: ObservableObject {
         // 3. Пересбор графа под формат файла.
         engine.disconnectNodeOutput(player)
         engine.connect(player, to: engine.mainMixerNode, format: loadedFile.processingFormat)
+        needsGraphRebuild = false
 
         // 4. Запланировать файл; completion (.dataPlayedBack — после фактического
         //    проигрывания хвоста через выход, а не после потребления данных нодой,
