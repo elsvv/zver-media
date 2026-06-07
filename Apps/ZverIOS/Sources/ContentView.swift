@@ -27,6 +27,12 @@ struct ContentView: View {
             }
             .safeAreaInset(edge: .bottom, spacing: 0) { miniPlayer }
             .tabItem { Label("Поиск", systemImage: "magnifyingglass") }
+
+            NavigationStack {
+                MacImportView()
+            }
+            .safeAreaInset(edge: .bottom, spacing: 0) { miniPlayer }
+            .tabItem { Label("Импорт", systemImage: "laptopcomputer.and.arrow.down") }
         }
     }
 
