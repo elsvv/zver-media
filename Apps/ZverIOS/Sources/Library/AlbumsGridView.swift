@@ -55,27 +55,31 @@ struct AlbumArtworkView: View {
     @State private var artwork: UIImage?
 
     var body: some View {
-        ZStack {
-            Rectangle().fill(.quaternary)
-            if let artwork {
-                Image(uiImage: artwork)
-                    .resizable()
-                    .scaledToFill()
-            } else {
-                Image(systemName: "music.note")
-                    .font(.largeTitle)
-                    .foregroundStyle(.secondary)
+        // Картинка лежит в overlay поверх квадрата: overlay не участвует
+        // в layout родителя, поэтому scaledToFill у непрямоугольной обложки
+        // не раздувает ячейку грида; вылезающую отрисовку режет clipShape.
+        Rectangle()
+            .fill(.quaternary)
+            .overlay {
+                if let artwork {
+                    Image(uiImage: artwork)
+                        .resizable()
+                        .scaledToFill()
+                } else {
+                    Image(systemName: "music.note")
+                        .font(.largeTitle)
+                        .foregroundStyle(.secondary)
+                }
             }
-        }
-        .aspectRatio(1, contentMode: .fit)
-        .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
-        .task(id: track?.id) {
-            artwork = nil
-            guard let track else { return }
-            let image = await loader.artwork(for: track)
-            // Отменённая задача (смена идентичности ячейки) не должна
-            // перетирать артворк: continuation выполняется и после await.
-            if !Task.isCancelled { artwork = image }
-        }
+            .aspectRatio(1, contentMode: .fit)
+            .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
+            .task(id: track?.id) {
+                artwork = nil
+                guard let track else { return }
+                let image = await loader.artwork(for: track)
+                // Отменённая задача (смена идентичности ячейки) не должна
+                // перетирать артворк: continuation выполняется и после await.
+                if !Task.isCancelled { artwork = image }
+            }
     }
 }
