@@ -2,8 +2,13 @@ import UIKit
 import ZverCore
 import ZverMetadata
 
-/// Ленивая загрузка обложек: кэш → встроенная (MetadataReader) →
-/// файл из папки трека (track.artworkFileURL) → nil.
+/// Ленивая загрузка обложек: кэш → файл из папки трека (track.artworkFileURL)
+/// → встроенная (MetadataReader) → nil.
+/// Файл из папки приоритетнее встроенной: `LibraryScanner` выставляет
+/// `artworkFileURL` только когда либо есть sidecar-обложка (правленая на Маке —
+/// должна побеждать встроенную), либо встроенной нет вовсе. Поэтому проба файла
+/// первой корректна: встроенная-единственная обложка не теряется (там
+/// artworkFileURL == nil), а правка с Мака выигрывает.
 /// Кэш в памяти по track.id (NSCache сам вытесняет при нехватке памяти).
 /// Параллельные запросы одного трека дедуплицируются: грузит первый,
 /// остальные ждут его Task.
@@ -37,13 +42,17 @@ final class ArtworkLoader {
 
     /// Вне MainActor (nonisolated async → глобальный экзекьютор):
     /// чтение метаданных/файла и декодирование — не на главном потоке.
+    ///
+    /// Сначала пробуем файл из папки (`artworkFileURL`): он несёт правленую на
+    /// Маке обложку из sidecar (должна побеждать встроенную) либо фоллбэк-обложку
+    /// при отсутствии встроенной. Только если файла нет/не читается — встроенная.
     private nonisolated static func load(_ track: Track) async -> UIImage? {
-        if let data = (try? await MetadataReader.read(url: track.url))?.artworkData,
+        if let fileURL = track.artworkFileURL,
+           let data = try? Data(contentsOf: fileURL),
            let image = UIImage(data: data) {
             return image
         }
-        guard let fileURL = track.artworkFileURL,
-              let data = try? Data(contentsOf: fileURL)
+        guard let data = (try? await MetadataReader.read(url: track.url))?.artworkData
         else { return nil }
         return UIImage(data: data)
     }
