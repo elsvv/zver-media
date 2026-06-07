@@ -11,6 +11,9 @@ public struct AudioFileInfo: Sendable {
     public var sampleRate: Double
     public var bitDepth: Int?
     public var artworkData: Data?
+    /// Обложка из файла в папке трека (cover/folder/front/albumart).
+    /// Заполняется LibraryScanner только когда нет встроенной (artworkData == nil).
+    public var artworkFileURL: URL?
     public var url: URL
 }
 
@@ -70,6 +73,7 @@ public enum MetadataReader {
             sampleRate: probed.sampleRate,
             bitDepth: probed.bitDepth,
             artworkData: artwork,
+            artworkFileURL: nil,
             url: url
         )
     }

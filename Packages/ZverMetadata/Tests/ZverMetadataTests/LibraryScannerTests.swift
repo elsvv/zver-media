@@ -72,4 +72,46 @@ import Foundation
         #expect(infos.count == 1)
         #expect(infos.first?.album == "Фикстуры")
     }
+    @Test func untaggedTrackPicksFolderJpgAsArtwork() async throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        let sub = tmp.appendingPathComponent("Radiohead - In Rainbows (2007) [24-44.1 WEB FLAC]")
+        try FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(
+            at: fixture("notags.flac"), to: sub.appendingPathComponent("notags.flac"))
+        try Data([0xFF, 0xD8, 0xFF]).write(to: sub.appendingPathComponent("folder.jpg"))
+
+        let infos = try await LibraryScanner.scan(directory: tmp)
+        #expect(infos.count == 1)
+        #expect(infos.first?.artworkData == nil)
+        #expect(infos.first?.artworkFileURL?.lastPathComponent == "folder.jpg")
+    }
+    @Test func coverNameWinsOverFolderCaseInsensitively() async throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        let sub = tmp.appendingPathComponent("Альбом")
+        try FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(
+            at: fixture("notags.flac"), to: sub.appendingPathComponent("notags.flac"))
+        try Data([0xFF, 0xD8, 0xFF]).write(to: sub.appendingPathComponent("folder.jpg"))
+        try Data([0x89, 0x50, 0x4E, 0x47]).write(to: sub.appendingPathComponent("Cover.PNG"))
+
+        let infos = try await LibraryScanner.scan(directory: tmp)
+        #expect(infos.count == 1)
+        #expect(infos.first?.artworkFileURL?.lastPathComponent == "Cover.PNG")
+    }
+    @Test func embeddedArtworkWinsOverFolderFile() async throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        let sub = tmp.appendingPathComponent("Альбом")
+        try FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(
+            at: fixture("tagged_16_44.flac"), to: sub.appendingPathComponent("01.flac"))
+        try Data([0xFF, 0xD8, 0xFF]).write(to: sub.appendingPathComponent("folder.jpg"))
+
+        let infos = try await LibraryScanner.scan(directory: tmp)
+        #expect(infos.count == 1)
+        #expect(infos.first?.artworkData != nil)
+        #expect(infos.first?.artworkFileURL == nil)
+    }
 }
