@@ -41,7 +41,7 @@ private struct ImportWindow: View {
                 if let draft = dropController.draft {
                     AlbumPreviewView(
                         draft: draft,
-                        onEnqueue: { enqueue(draft: draft) },
+                        onEnqueue: { await enqueue(draft: draft) },
                         onCancel: { dropController.clear() }
                     )
                 } else {
@@ -72,32 +72,32 @@ private struct ImportWindow: View {
 
     /// «В очередь»: снимает данные с `@MainActor`-модели, собирает манифест с
     /// хешированием файлов ВНЕ главного потока, затем публикует в очередь на
-    /// `@MainActor`. После успеха очищает черновик.
-    private func enqueue(draft: AlbumDraft) {
+    /// `@MainActor`. После успеха очищает черновик и возвращает nil; на ошибке
+    /// возвращает текст (RU) — `AlbumPreviewView` сбросит индикацию и покажет его,
+    /// черновик остаётся для повторной попытки.
+    private func enqueue(draft: AlbumDraft) async -> String? {
         let snapshot = draft.snapshot()
-        Task {
-            let album = await Task.detached(priority: .userInitiated) {
-                () -> QueuedAlbum.BuildResult in
-                do {
-                    let manifestAlbum = try ManifestBuilder.buildAlbum(from: snapshot)
-                    return .success(manifestAlbum)
-                } catch {
-                    return .failure("Не удалось подготовить альбом к отправке.")
-                }
-            }.value
-
-            switch album {
-            case .success(let manifestAlbum):
-                queue.enqueue(QueuedAlbum(
-                    manifestAlbum: manifestAlbum,
-                    sourceFolder: snapshot.sourceFolder
-                ))
-                dropController.clear()
-            case .failure:
-                // Каркас: ошибку показываем через очистку превью с откатом не
-                // делаем; S3-9 добавит видимый алерт. Черновик оставляем.
-                break
+        let album = await Task.detached(priority: .userInitiated) {
+            () -> QueuedAlbum.BuildResult in
+            do {
+                let manifestAlbum = try ManifestBuilder.buildAlbum(from: snapshot)
+                return .success(manifestAlbum)
+            } catch {
+                return .failure("Не удалось подготовить альбом к отправке.")
             }
+        }.value
+
+        switch album {
+        case .success(let manifestAlbum):
+            queue.enqueue(QueuedAlbum(
+                manifestAlbum: manifestAlbum,
+                sourceFolder: snapshot.sourceFolder
+            ))
+            dropController.clear()
+            return nil
+        case .failure(let message):
+            // Черновик оставляем, чтобы пользователь мог повторить отправку.
+            return message
         }
     }
 }
@@ -156,6 +156,9 @@ private struct DropZone: View {
 /// Содержимое меню-бара: краткий статус очереди.
 private struct MenuBarContent: View {
     @ObservedObject var queue: OutgoingQueue
+    /// Открывает/фокусирует главное окно даже если оно было закрыто
+    /// (LSUIElement-агент: `NSApp.activate` закрытую SwiftUI-сцену не воскрешает).
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         if queue.isEmpty {
@@ -169,6 +172,7 @@ private struct MenuBarContent: View {
         }
         Divider()
         Button("Открыть окно синка") {
+            openWindow(id: "main")
             NSApp.activate(ignoringOtherApps: true)
         }
         Button("Выйти") {

@@ -10,11 +10,17 @@ import AppKit
 /// `OutgoingQueue` (хеширование — вне главного потока).
 struct AlbumPreviewView: View {
     @ObservedObject var draft: AlbumDraft
-    let onEnqueue: () -> Void
+    /// Асинхронная сборка манифеста + постановка в очередь. Возвращает текст
+    /// ошибки (RU) при сбое, либо nil на успехе. View сама управляет
+    /// `isBuilding`/индикацией ошибки по результату — чтобы UI не залипал на
+    /// failure-пути (черновик остаётся, можно повторить отправку).
+    let onEnqueue: () async -> String?
     let onCancel: () -> Void
 
     /// true, пока идёт сбор манифеста (хеширование файлов) после «В очередь».
     @State private var isBuilding = false
+    /// Текст ошибки последней попытки постановки в очередь (RU), если был сбой.
+    @State private var enqueueError: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -94,13 +100,27 @@ struct AlbumPreviewView: View {
         HStack {
             Button("Отмена", action: onCancel)
                 .keyboardShortcut(.cancelAction)
+            if let enqueueError {
+                Text(enqueueError)
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .lineLimit(2)
+            }
             Spacer()
             if isBuilding {
                 ProgressView().controlSize(.small)
             }
             Button("В очередь") {
+                enqueueError = nil
                 isBuilding = true
-                onEnqueue()
+                Task {
+                    // На успехе ZverMacApp очищает черновик (вью демонтируется);
+                    // на ошибке черновик остаётся, поэтому ОБЯЗАТЕЛЬНО сбрасываем
+                    // isBuilding и показываем ошибку — иначе кнопка залипнет.
+                    let error = await onEnqueue()
+                    isBuilding = false
+                    enqueueError = error
+                }
             }
             .keyboardShortcut(.defaultAction)
             .disabled(isBuilding)
