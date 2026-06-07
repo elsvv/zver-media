@@ -26,9 +26,20 @@ final class PlayerEngine: ObservableObject {
 
     /// Completion-handler scheduleFile/scheduleSegment (даже с .dataPlayedBack)
     /// вызывается и при ручном player.stop(). Поколение инкрементируется перед
-    /// каждым stop/новой загрузкой — устаревший completion игнорируется, next()
-    /// срабатывает только когда трек действительно дослушан.
+    /// каждым stop/новой загрузкой — устаревший completion игнорируется, переход
+    /// к следующему треку срабатывает только когда трек действительно дослушан.
     private var generation = 0
+
+    /// Файл следующего трека, предзапланированный в очередь ноды (gapless).
+    /// nil — следующего трека нет или его формат отличается от текущего.
+    /// player.stop() чистит очередь ноды — вместе с ним обнуляется и это поле.
+    private var prescheduledFile: AVAudioFile?
+
+    /// Кадровая позиция ноды на момент начала текущего файла. При gapless-переходе
+    /// нода не останавливается и её sampleTime растёт сквозь треки — база
+    /// вычитается при расчёте currentTime. Обнуляется при каждом player.stop()
+    /// (sampleTime ноды после него начинается заново с нуля).
+    private var sampleTimeBase: AVAudioFramePosition = 0
 
     /// Играли ли на момент начала прерывания (звонок, Siri) —
     /// чтобы после .ended с .shouldResume продолжить только если играли.
@@ -215,6 +226,8 @@ final class PlayerEngine: ObservableObject {
         let gen = generation
 
         player.stop()
+        prescheduledFile = nil
+        sampleTimeBase = 0
         startFrame = clampedFrame
         currentTime = Double(clampedFrame) / sampleRate
 
@@ -223,6 +236,7 @@ final class PlayerEngine: ObservableObject {
                                completionCallbackType: .dataPlayedBack) { [weak self] _ in
             Task { @MainActor in self?.handleTrackFinished(generation: gen) }
         }
+        prescheduleNext()
         if shouldPlay {
             if !engine.isRunning {
                 try? engine.start()
@@ -273,6 +287,8 @@ final class PlayerEngine: ObservableObject {
 
         // 2. Согласовать частоту сессии с файлом (bit-perfect, если ЦАП умеет).
         player.stop()
+        prescheduledFile = nil
+        sampleTimeBase = 0
         engine.stop()
         _ = SampleRateCoordinator.prepare(session: session,
                                           fileRate: loadedFile.fileFormat.sampleRate)
@@ -307,6 +323,34 @@ final class PlayerEngine: ObservableObject {
 
         // 6. Таймер позиции.
         startTimeObserver()
+
+        // 7. Gapless: предзапланировать следующий трек той же частоты.
+        prescheduleNext()
+    }
+
+    /// Gapless: если следующий трек очереди существует и его формат совпадает
+    /// с текущим (sampleRate и channelCount), файл сразу ставится в очередь
+    /// ноды — она сыграет его встык, без зазора. При другом формате не
+    /// предпланируем: completion пойдёт обычным путём next() → loadAndPlay
+    /// с пересбором графа под новую частоту (микропауза на переключение ЦАПа).
+    private func prescheduleNext() {
+        prescheduledFile = nil
+        guard let file else { return }
+        let nextIndex = (queue.currentIndex ?? -1) + 1
+        guard nextIndex < queue.tracks.count,
+              let nextFile = try? AVAudioFile(forReading: queue.tracks[nextIndex].url)
+        else { return }
+        let current = file.processingFormat
+        let next = nextFile.processingFormat
+        guard next.sampleRate == current.sampleRate,
+              next.channelCount == current.channelCount else { return }
+
+        let gen = generation
+        player.scheduleFile(nextFile, at: nil,
+                            completionCallbackType: .dataPlayedBack) { @Sendable [weak self] _ in
+            Task { @MainActor in self?.handleTrackFinished(generation: gen) }
+        }
+        prescheduledFile = nextFile
     }
 
     /// Артворк грузится асинхронно: Now Playing сначала обновляется без него,
@@ -325,7 +369,26 @@ final class PlayerEngine: ObservableObject {
 
     private func handleTrackFinished(generation gen: Int) {
         guard gen == generation else { return }
-        next()
+        guard let nextFile = prescheduledFile else {
+            next()
+            return
+        }
+        // Gapless: нода уже играет предзапланированный файл — ничего не
+        // останавливаем, только двигаем бухгалтерию. Дослушанный файл дал
+        // ноде length - startFrame кадров (после seek сегмент короче полного).
+        if let finished = file {
+            sampleTimeBase += finished.length - startFrame
+        }
+        prescheduledFile = nil
+        queue.advance()
+        file = nextFile
+        startFrame = 0
+        currentTime = 0
+        updateNowPlaying()
+        if let track = queue.current {
+            refreshArtwork(for: track)
+        }
+        prescheduleNext()
     }
 
     private func stopPlayback() {
@@ -333,7 +396,9 @@ final class PlayerEngine: ObservableObject {
         player.stop()
         engine.stop()
         file = nil
+        prescheduledFile = nil
         startFrame = 0
+        sampleTimeBase = 0
         timeObserver?.invalidate()
         timeObserver = nil
         currentTime = 0
@@ -363,7 +428,7 @@ final class PlayerEngine: ObservableObject {
               let nodeTime = player.lastRenderTime,
               let playerTime = player.playerTime(forNodeTime: nodeTime)
         else { return }
-        let frames = max(playerTime.sampleTime, 0) + startFrame
+        let frames = max(playerTime.sampleTime - sampleTimeBase, 0) + startFrame
         currentTime = Double(frames) / file.processingFormat.sampleRate
     }
 }
