@@ -15,6 +15,10 @@ public enum LibraryScanner {
     /// имя непосредственной родительской папки.
     /// У файлов без встроенной обложки artworkFileURL указывает на файл
     /// cover/folder/front/albumart (jpg/jpeg/png) из папки трека, если есть.
+    /// Если в папке есть валидный sidecar (`album.zvermeta.json`), его правки
+    /// тегов накладываются поверх прочитанных (override побеждает тег), а
+    /// `artworkFileName` из sidecar выставляет artworkFileURL независимо от
+    /// встроенной обложки. Битый/нечитаемый sidecar игнорируется.
     /// Результат отсортирован по пути файла.
     ///
     /// Бросает, если корневую директорию невозможно перечислить
@@ -25,13 +29,39 @@ public enum LibraryScanner {
         let rootPath = directory.standardizedFileURL.path
         var infos: [AudioFileInfo] = []
         var artworkByFolder: [String: URL?] = [:]
+        var sidecarByFolder: [String: AlbumSidecar?] = [:]
         for url in urls {
             guard var info = try? await MetadataReader.read(url: url) else { continue }
             let parent = url.deletingLastPathComponent().standardizedFileURL
+
+            // Sidecar читаем один раз на папку (как и обложку).
+            let sidecar: AlbumSidecar?
+            if let cached = sidecarByFolder[parent.path] {
+                sidecar = cached
+            } else {
+                let loaded = loadSidecar(inFolder: parent)
+                sidecarByFolder[parent.path] = loaded
+                sidecar = loaded
+            }
+
+            // Override тегов: любое непустое поле побеждает прочитанный тег.
+            if let override = sidecar?.tracks[url.lastPathComponent] {
+                if let t = override.title { info.title = t }
+                if let a = override.artist { info.artist = a }
+                if let al = override.album { info.album = al }
+                if let y = override.year { info.year = y }
+                if let n = override.trackNumber { info.trackNumber = n }
+            }
+
             if info.album == nil, parent.path != rootPath {
                 info.album = parent.lastPathComponent
             }
-            if info.artworkData == nil {
+
+            // artworkFileName из sidecar побеждает встроенную обложку (контракт
+            // сканера; приоритет показа над embedded решается на стороне iOS).
+            if let artworkFileName = sidecar?.artworkFileName {
+                info.artworkFileURL = parent.appendingPathComponent(artworkFileName)
+            } else if info.artworkData == nil {
                 if let cached = artworkByFolder[parent.path] {
                     info.artworkFileURL = cached
                 } else {
@@ -43,6 +73,14 @@ public enum LibraryScanner {
             infos.append(info)
         }
         return infos
+    }
+
+    /// Читает sidecar из папки. Отсутствие/битый/нечитаемый файл → `nil`
+    /// (фоллбэк к тегам), скан не падает.
+    private static func loadSidecar(inFolder folder: URL) -> AlbumSidecar? {
+        let url = folder.appendingPathComponent(AlbumSidecar.fileName)
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(AlbumSidecar.self, from: data)
     }
 
     private static func artworkFileURL(inFolder folder: URL) -> URL? {
