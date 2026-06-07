@@ -1,0 +1,47 @@
+name: ZverMac
+options:
+  bundleIdPrefix: dev.zver
+  deploymentTarget:
+    macOS: "14.0"
+packages:
+  ZverCore:
+    path: ../../Packages/ZverCore
+  ZverMetadata:
+    path: ../../Packages/ZverMetadata
+  ZverTransport:
+    path: ../../Packages/ZverTransport
+targets:
+  ZverMac:
+    type: application
+    platform: macOS
+    sources: [Sources]
+    dependencies:
+      - package: ZverCore
+      - package: ZverMetadata
+      - package: ZverTransport
+    settings:
+      base:
+        SWIFT_VERSION: "6.0"
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: 6RWCS65D85
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: Zver Media
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSUIElement: true
+        LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
+        NSHumanReadableCopyright: ""
+        NSLocalNetworkUsageDescription: "Zver Media передаёт альбомы на ваш iPhone по локальной сети: ищет устройства поблизости и раздаёт музыку напрямую, без интернета и облака."
+        NSBonjourServices:
+          - _zver._tcp
+schemes:
+  ZverMac:
+    build:
+      targets:
+        ZverMac: all
+    run:
+      config: Debug
