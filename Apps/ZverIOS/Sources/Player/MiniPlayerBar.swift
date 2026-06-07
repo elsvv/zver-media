@@ -28,6 +28,7 @@ struct MiniPlayerBar: View {
                             .frame(width: 44, height: 44)
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel(engine.state == .playing ? "Пауза" : "Играть")
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
@@ -36,6 +37,12 @@ struct MiniPlayerBar: View {
             .contentShape(Rectangle())
             .onTapGesture { showsPlayerScreen = true }
             .task(id: track.id) {
+                // Сначала синхронный peek в кэш: без сброса в nil нет
+                // мигания плейсхолдером при смене трека.
+                if let cached = engine.artworkLoader.cached(for: track) {
+                    artwork = cached
+                    return
+                }
                 artwork = nil
                 let image = await engine.artworkLoader.artwork(for: track)
                 // Отменённая задача (смена трека) не должна перетирать артворк:

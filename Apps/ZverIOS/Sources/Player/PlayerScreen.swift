@@ -19,6 +19,12 @@ struct PlayerScreen: View {
             if let track = engine.queue.current {
                 content(for: track)
                     .task(id: track.id) {
+                        // Сначала синхронный peek в кэш: без сброса в nil нет
+                        // мигания плейсхолдером при смене трека.
+                        if let cached = engine.artworkLoader.cached(for: track) {
+                            artwork = cached
+                            return
+                        }
                         artwork = nil
                         let image = await engine.artworkLoader.artwork(for: track)
                         // Отменённая задача (смена трека) не должна перетирать артворк:
@@ -28,6 +34,13 @@ struct PlayerScreen: View {
             }
         }
         .presentationDragIndicator(.visible)
+        .onChange(of: engine.queue.current?.id) { _, _ in
+            // Авто-переход на следующий трек во время драга слайдера:
+            // незавершённый скраб по старому треку не должен переехать
+            // на новый (seek по отпусканию ушёл бы в чужую позицию).
+            isScrubbing = false
+            scrubTime = 0
+        }
         .onChange(of: engine.queue.current) { _, current in
             // Очередь закончилась — пустой шторке висеть незачем.
             if current == nil { dismiss() }
@@ -128,14 +141,17 @@ struct PlayerScreen: View {
                 Image(systemName: "backward.fill")
                     .font(.title)
             }
+            .accessibilityLabel("Назад")
             Button { engine.togglePlayPause() } label: {
                 Image(systemName: engine.state == .playing ? "pause.fill" : "play.fill")
                     .font(.system(size: 44))
             }
+            .accessibilityLabel(engine.state == .playing ? "Пауза" : "Играть")
             Button { engine.next() } label: {
                 Image(systemName: "forward.fill")
                     .font(.title)
             }
+            .accessibilityLabel("Вперёд")
         }
         .foregroundStyle(.primary)
         .buttonStyle(.plain)

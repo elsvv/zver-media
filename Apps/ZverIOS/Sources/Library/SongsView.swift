@@ -32,9 +32,11 @@ struct SongsView: View {
             if let artist = group.artist {
                 Text(artist)
                     .font(.caption2)
-                    .textCase(nil)
             }
         }
+        // На весь заголовок: List капитализирует заголовки секций,
+        // названия альбомов и артистов должны остаться как в тегах.
+        .textCase(nil)
     }
 
     private func trackRow(_ track: Track) -> some View {
