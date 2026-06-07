@@ -7,6 +7,7 @@ import SwiftUI
 /// `Task { @MainActor in … }`.
 struct QueueView: View {
     @ObservedObject var queue: OutgoingQueue
+    @ObservedObject var server: ServerCoordinator
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -22,6 +23,8 @@ struct QueueView: View {
             .padding(12)
             Divider()
             content
+            Divider()
+            ServerStatusPanel(server: server, queueIsEmpty: queue.isEmpty)
         }
     }
 
@@ -111,5 +114,100 @@ private struct QueueRow: View {
         case .delivered: return "Доставлен"
         case .failed(let message): return message
         }
+    }
+}
+
+/// Нижняя панель очереди: статус раздачи в сети + сопряжение телефона.
+///
+/// Показывает, слушает ли сервер (порт), 6-значный код сопряжения при открытом
+/// окне pairing и результат сопряжения. Сервер стартует автоматически при
+/// непустой очереди (`ServerCoordinator`), здесь — только индикация и запуск/
+/// остановка окна pairing.
+private struct ServerStatusPanel: View {
+    @ObservedObject var server: ServerCoordinator
+    let queueIsEmpty: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            statusRow
+            pairingSection
+        }
+        .padding(12)
+    }
+
+    @ViewBuilder
+    private var statusRow: some View {
+        HStack(spacing: 8) {
+            statusIcon
+            Text(statusText)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private var statusIcon: some View {
+        switch server.status {
+        case .stopped:
+            Image(systemName: "wifi.slash").foregroundStyle(.secondary)
+        case .running:
+            Image(systemName: "wifi").foregroundStyle(.green)
+        case .failed:
+            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+        }
+    }
+
+    private var statusText: String {
+        switch server.status {
+        case .stopped:
+            return queueIsEmpty ? "Очередь пуста — раздача выключена" : "Раздача не запущена"
+        case let .running(port):
+            return "Раздаю в сети (порт \(port))"
+        case let .failed(message):
+            return message
+        }
+    }
+
+    @ViewBuilder
+    private var pairingSection: some View {
+        if let code = server.pairing.code {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Код сопряжения")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Text(spacedCode(code))
+                    .font(.system(.title2, design: .monospaced))
+                    .fontWeight(.semibold)
+                Text("Введите этот код на iPhone в экране «Импорт с Мака».")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("Скрыть код") { server.stopPairing() }
+                    .controlSize(.small)
+            }
+        } else if server.pairing.didPair {
+            Label("iPhone сопряжён", systemImage: "checkmark.circle.fill")
+                .font(.caption)
+                .foregroundStyle(.green)
+            Button("Сопрячь ещё устройство") { server.startPairing() }
+                .controlSize(.small)
+                .disabled(queueIsEmpty)
+        } else {
+            Button("Сопрячь iPhone") { server.startPairing() }
+                .controlSize(.small)
+                .disabled(queueIsEmpty)
+            if queueIsEmpty {
+                Text("Добавьте альбом в очередь, чтобы запустить раздачу.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+    }
+
+    /// Разбивает код на две тройки для читаемости («123 456»).
+    private func spacedCode(_ code: String) -> String {
+        guard code.count == 6 else { return code }
+        let mid = code.index(code.startIndex, offsetBy: 3)
+        return "\(code[code.startIndex..<mid]) \(code[mid...])"
     }
 }

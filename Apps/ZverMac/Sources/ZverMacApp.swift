@@ -9,17 +9,26 @@ import ZverTransport
 /// (сервер + Bonjour + pairing) — S3-9, здесь только каркас.
 @main
 struct ZverMacApp: App {
-    @StateObject private var queue = OutgoingQueue()
+    @StateObject private var queue: OutgoingQueue
     @StateObject private var dropController = DropController()
+    /// Координатор сетевой раздачи (сервер + Bonjour + pairing). Создаётся поверх
+    /// той же очереди, что и UI: стартует сервер при непустой очереди.
+    @StateObject private var server: ServerCoordinator
+
+    init() {
+        let queue = OutgoingQueue()
+        _queue = StateObject(wrappedValue: queue)
+        _server = StateObject(wrappedValue: ServerCoordinator(queue: queue))
+    }
 
     var body: some Scene {
         Window("Zver Media — Синк", id: "main") {
-            ImportWindow(queue: queue, dropController: dropController)
+            ImportWindow(queue: queue, dropController: dropController, server: server)
         }
         .defaultSize(width: 760, height: 560)
 
         MenuBarExtra("Zver Media", systemImage: "music.note.house") {
-            MenuBarContent(queue: queue)
+            MenuBarContent(queue: queue, server: server)
         }
     }
 }
@@ -28,13 +37,14 @@ struct ZverMacApp: App {
 private struct ImportWindow: View {
     @ObservedObject var queue: OutgoingQueue
     @ObservedObject var dropController: DropController
+    @ObservedObject var server: ServerCoordinator
 
     /// Подсветка дроп-зоны при наведении папки.
     @State private var isTargeted = false
 
     var body: some View {
         HSplitView {
-            QueueView(queue: queue)
+            QueueView(queue: queue, server: server)
                 .frame(minWidth: 240, idealWidth: 280)
 
             ZStack {
@@ -156,6 +166,7 @@ private struct DropZone: View {
 /// Содержимое меню-бара: краткий статус очереди.
 private struct MenuBarContent: View {
     @ObservedObject var queue: OutgoingQueue
+    @ObservedObject var server: ServerCoordinator
     /// Открывает/фокусирует главное окно даже если оно было закрыто
     /// (LSUIElement-агент: `NSApp.activate` закрытую SwiftUI-сцену не воскрешает).
     @Environment(\.openWindow) private var openWindow
@@ -169,6 +180,15 @@ private struct MenuBarContent: View {
             ForEach(queue.albums) { album in
                 Text(album.manifestAlbum.title)
             }
+        }
+        Divider()
+        switch server.status {
+        case .stopped:
+            Text("Раздача не запущена")
+        case let .running(port):
+            Text("Раздаю в сети (порт \(port))")
+        case let .failed(message):
+            Text(message)
         }
         Divider()
         Button("Открыть окно синка") {
