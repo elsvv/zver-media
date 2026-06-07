@@ -57,8 +57,18 @@ public enum LibraryScanner {
                 info.album = parent.lastPathComponent
             }
 
-            // artworkFileName из sidecar побеждает встроенную обложку (контракт
-            // сканера; приоритет показа над embedded решается на стороне iOS).
+            // artworkFileName из sidecar побеждает встроенную обложку: сканер
+            // выставляет artworkFileURL даже при наличии встроенной обложки
+            // (artworkData != nil), отдавая показу оба источника.
+            // TODO(S3-11): приоритет ПОКАЗА над embedded — за стороной iOS.
+            // Сейчас ArtworkLoader.load (Apps/ZverIOS/Sources/Player/) сначала
+            // отдаёт встроенную artworkData и только при её отсутствии падает на
+            // artworkFileURL — поэтому для трека со встроенной обложкой правленая
+            // на Маке обложка из sidecar на экран НЕ попадёт. Закрыть в S3-11:
+            // либо при наличии sidecar-обложки предпочитать artworkFileURL
+            // встроенной, либо телефон при импорте материализует override как
+            // файл и не оставляет встроенную видимой. Контракт сканера (этот
+            // overlay) от решения показа не зависит и покрыт тестами.
             if let artworkFileName = sidecar?.artworkFileName {
                 info.artworkFileURL = parent.appendingPathComponent(artworkFileName)
             } else if info.artworkData == nil {

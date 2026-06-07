@@ -187,6 +187,10 @@ import Foundation
 
         let infos = try await LibraryScanner.scan(directory: tmp)
         #expect(infos.count == 1)
+        // Контракт сканера: при наличии встроенной обложки И sidecar-обложки
+        // сканер отдаёт ОБА источника — artworkData (встроенная) остаётся,
+        // artworkFileURL указывает на правленый файл. Этого достаточно, чтобы
+        // показ (S3-11, ArtworkLoader на стороне iOS) мог предпочесть override.
         #expect(infos.first?.artworkData != nil)
         #expect(infos.first?.artworkFileURL?.lastPathComponent == "edited.jpg")
     }
