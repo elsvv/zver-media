@@ -3,7 +3,9 @@ import ZverCore
 
 struct ContentView: View {
     @StateObject private var engine = PlayerEngine()
-    @StateObject private var library = LibraryStore()
+    @StateObject private var library = LibraryStore(
+        catalogStore: CatalogStore(catalog: LibraryStore.openCatalog())
+    )
 
     var body: some View {
         NavigationStack {
