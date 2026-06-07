@@ -8,15 +8,29 @@ struct ContentView: View {
     )
 
     var body: some View {
-        NavigationStack {
-            LibraryView(store: library, engine: engine)
-        }
-        // Мини-плеер поверх всех экранов навигации: inset применяется
-        // ко всему стеку, контент списков не прячется под баром.
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            if engine.queue.current != nil {
-                MiniPlayerBar(engine: engine)
+        TabView {
+            NavigationStack {
+                LibraryView(store: library, engine: engine)
             }
+            // Мини-плеер поверх всех экранов навигации таба: inset
+            // применяется ко всему стеку (контент списков не прячется
+            // под баром) и остаётся над таб-баром. На TabView целиком
+            // inset нельзя — лёг бы ПОД таб-баром.
+            .safeAreaInset(edge: .bottom, spacing: 0) { miniPlayer }
+            .tabItem { Label("Библиотека", systemImage: "music.note.list") }
+
+            NavigationStack {
+                SearchView(store: library, engine: engine)
+            }
+            .safeAreaInset(edge: .bottom, spacing: 0) { miniPlayer }
+            .tabItem { Label("Поиск", systemImage: "magnifyingglass") }
+        }
+    }
+
+    @ViewBuilder
+    private var miniPlayer: some View {
+        if engine.queue.current != nil {
+            MiniPlayerBar(engine: engine)
         }
     }
 }

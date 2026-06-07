@@ -92,6 +92,18 @@ final class LibraryStore: ObservableObject {
         }
     }
 
+    /// Поиск по каталогу: подстрока в title/artist/album без учёта
+    /// регистра (CatalogStore.search), пустой/пробельный запрос → [].
+    /// Чтение БД — вне главного потока, как и остальные выборки.
+    /// Ошибка чтения каталога эквивалентна пустому результату.
+    func search(query: String) async -> [Track] {
+        let catalogStore = self.catalogStore
+        let documentsURL = self.documentsURL
+        return await Task.detached(priority: .userInitiated) {
+            (try? catalogStore.search(query, documentsURL: documentsURL)) ?? []
+        }.value
+    }
+
     /// AudioFileInfo → строка каталога: пути относительные от Documents.
     /// Файл вне Documents (не должно случаться) — пропускается.
     private nonisolated static func record(from info: AudioFileInfo,
