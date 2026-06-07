@@ -4,13 +4,14 @@
 Нативный iOS-плеер с выводом на USB ЦАП + Mac-компаньон (заливка альбомов,
 метадата, пульт) + Яндекс.Диск как холодный ярус хранения.
 
-Готовы **этап 1 «Ядро плеера»** и **этап 2 «Каталог и библиотека»**.
-Следующий — этап 3 «Синк с Мака».
+Готовы **этап 1 «Ядро плеера»**, **этап 2 «Каталог и библиотека»** и
+**этап 3 «Синк с Мака»**. Следующий — этап 4 «Яндекс».
 
 Документы:
 - [Дизайн системы](docs/plans/2026-06-06-zver-cloud-design.md)
 - [План этапа 1](docs/plans/2026-06-06-stage1-player-core.md)
 - [План этапа 2](docs/plans/2026-06-07-stage2-catalog-library.md)
+- [План этапа 3](docs/plans/2026-06-07-stage3-mac-sync.md)
 
 ## Что умеет
 
@@ -33,25 +34,76 @@
   `cover/folder/front/albumart.{jpg,jpeg,png}` из его папки; если нет
   тега ALBUM — альбомом становится имя родительской папки.
 
+## Синк с Мака (этап 3)
+
+Pull-передача альбомов **Mac → iPhone** по локальной сети, без облака и кабеля.
+
+- **Mac-компаньон `ZverMac`** — приложение в меню-баре: перетащил папку
+  альбома в окно → распарсились теги → превью с обложкой и списком треков →
+  инлайн-редактор метадаты → «В очередь». Раздаёт очередь по HTTP.
+- **Правки метадаты не трогают исходные файлы.** Изменённые на Маке
+  название/артист/год/номер трека/обложка уходят только в манифест синка.
+  Телефон при импорте материализует их рядом с треками как версионируемый
+  **sidecar** `album.zvermeta.json`; `LibraryScanner` накладывает overlay
+  поверх тегов файла (правленая обложка из sidecar **побеждает** встроенную).
+  `catalog.sqlite` остаётся чисто пересобираемым кэшем — правки переживают
+  потерю/реинсталл БД, рескан идемпотентен.
+- **Обнаружение по Bonjour** (`_zver._tcp`): телефон видит Маки в сети,
+  выбираешь нужный.
+- **Pairing 6-значным кодом** (первый раз): Мак показывает код, телефон его
+  вводит → получает токен, который дальше носит в `X-Zver-Token`. Повторный
+  pairing не нужен.
+- **Докачиваемая загрузка**: дельта-планировщик качает только недостающее
+  и изменившееся (сверка по SHA-256); HTTP Range/`If-Range`/resume data
+  переживают обрыв сети и продолжают с места. Каждый файл после загрузки
+  сверяется по SHA-256 из манифеста — битый перекачивается.
+- **Перезаливка обновляет на месте**: `albumId` детерминирован
+  (`<artist> - <title> (<year>)`), повторный импорт того же альбома не плодит
+  дублей. После раскладки телефон шлёт Маку `confirm`, и альбом уходит из
+  очереди Мака.
+
+Вся чистая логика синка (версионируемый JSON-манифест, SHA-256, pairing,
+дельта-планировщик, разбор HTTP — парсер, диапазоны, роутинг) живёт в пакете
+`Packages/ZverTransport` и покрыта юнит-тестами; рантайм-сетевые объекты
+(`NWListener`/`NWBrowser`/`NWConnection`) — тонкие адаптеры в приложениях.
+
 ## Структура
 
 ```
 Packages/ZverCore/      — SPM: модели, очередь воспроизведения, координатор частоты
-Packages/ZverMetadata/  — SPM: парсинг тегов (Vorbis-комменты), сканер папки
+Packages/ZverMetadata/  — SPM: парсинг тегов (Vorbis-комменты), сканер папки, sidecar-overlay
+Packages/ZverTransport/ — SPM: чистая логика синка (манифест, SHA-256, pairing,
+                          Bonjour-реестр, дельта-планировщик, разбор HTTP)
 Apps/ZverIOS/           — iOS-приложение (XcodeGen, проект генерируется из project.yml)
+Apps/ZverMac/           — Mac-компаньон ZverMac (меню-бар, drag-drop, HTTP-раздача)
 docs/plans/             — дизайн и implementation-планы
 scripts/                — вспомогательные скрипты
 ```
 
 ## Сборка
 
-`ZverIOS.xcodeproj` не хранится в git — генерируется XcodeGen:
+`.xcodeproj` обоих таргетов не хранятся в git — генерируются XcodeGen.
+
+**iOS-таргет:**
 
 ```bash
 cd Apps/ZverIOS && xcodegen generate
 xcodebuild -project Apps/ZverIOS/ZverIOS.xcodeproj -scheme ZverIOS \
   -destination "platform=iOS Simulator,name=iPhone 17 Pro" build
 ```
+
+**Mac-таргет `ZverMac`** (компаньон для заливки альбомов):
+
+```bash
+xcodegen generate --spec Apps/ZverMac/project.yml --project Apps/ZverMac
+xcodebuild -project Apps/ZverMac/ZverMac.xcodeproj -scheme ZverMac \
+  -destination "platform=macOS" build
+```
+
+Открыть в Xcode (`open Apps/ZverMac/ZverMac.xcodeproj`) и нажать **Run** —
+приложение появляется в меню-баре. Для синка Мак и iPhone должны быть в одной
+Wi-Fi-сети; при первом запуске система спросит разрешение на доступ к локальной
+сети.
 
 ## Установка на iPhone
 
@@ -82,8 +134,9 @@ xcodebuild -project Apps/ZverIOS/ZverIOS.xcodeproj -scheme ZverIOS \
 Пакеты — чистая логика, тестируются на macOS без симулятора:
 
 ```bash
-cd Packages/ZverCore && swift test
-cd Packages/ZverMetadata && swift test
+swift test --package-path Packages/ZverCore
+swift test --package-path Packages/ZverMetadata
+swift test --package-path Packages/ZverTransport
 ```
 
 ## Тулчейн

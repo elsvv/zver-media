@@ -8,6 +8,8 @@ packages:
     path: ../../Packages/ZverCore
   ZverMetadata:
     path: ../../Packages/ZverMetadata
+  ZverTransport:
+    path: ../../Packages/ZverTransport
 targets:
   ZverIOS:
     type: application
@@ -16,6 +18,7 @@ targets:
     dependencies:
       - package: ZverCore
       - package: ZverMetadata
+      - package: ZverTransport
     settings:
       base:
         SWIFT_VERSION: "6.0"
@@ -35,6 +38,8 @@ targets:
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        NSLocalNetworkUsageDescription: "Zver ищет ваш Mac в локальной сети, чтобы импортировать с него альбомы."
+        NSBonjourServices: [_zver._tcp]
   ZverIOSUITests:
     type: bundle.ui-testing
     platform: iOS
