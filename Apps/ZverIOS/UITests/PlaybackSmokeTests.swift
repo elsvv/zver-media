@@ -18,6 +18,12 @@ final class PlaybackSmokeTests: XCTestCase {
         let app = XCUIApplication()
         app.launch()
 
+        // Корень — разделы библиотеки; список треков теперь в «Песнях».
+        let songs = app.staticTexts["Песни"]
+        XCTAssertTrue(songs.waitForExistence(timeout: 10),
+                      "Нет раздела «Песни» на корневом экране библиотеки")
+        songs.tap()
+
         let row = app.staticTexts["Длинный трек"]
         XCTAssertTrue(row.waitForExistence(timeout: 10),
                       "В библиотеке нет «Длинный трек» — ui_smoke.flac не в Documents приложения?")

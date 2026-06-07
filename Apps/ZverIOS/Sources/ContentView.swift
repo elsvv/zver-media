@@ -9,14 +9,13 @@ struct ContentView: View {
 
     var body: some View {
         NavigationStack {
-            ZStack {
-                LibraryView(store: library, engine: engine)
-                VStack {
-                    Spacer()
-                    if engine.queue.current != nil {
-                        MiniPlayerBar(engine: engine)
-                    }
-                }
+            LibraryView(store: library, engine: engine)
+        }
+        // Мини-плеер поверх всех экранов навигации: inset применяется
+        // ко всему стеку, контент списков не прячется под баром.
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if engine.queue.current != nil {
+                MiniPlayerBar(engine: engine)
             }
         }
     }
