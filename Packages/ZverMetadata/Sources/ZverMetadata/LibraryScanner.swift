@@ -1,4 +1,5 @@
 import Foundation
+import ImageIO
 
 public enum LibraryScanner {
     private static let audioExtensions: Set<String> = [
@@ -6,8 +7,12 @@ public enum LibraryScanner {
     ]
 
     /// Имена файлов-обложек в порядке убывания приоритета (без учёта регистра).
-    private static let artworkNames = ["cover", "folder", "front", "albumart"]
-    private static let artworkExtensions: Set<String> = ["jpg", "jpeg", "png"]
+    /// «Передние» имена раньше, чтобы при наличии и front, и back взялась передняя.
+    private static let artworkNames = [
+        "cover", "folder", "front", "front cover", "albumart",
+        "albumartsmall", "album", "art", "artwork",
+    ]
+    private static let artworkExtensions: Set<String> = ["jpg", "jpeg", "png", "webp"]
 
     /// Рекурсивно обходит директорию, читает метаданные всех аудиофайлов.
     /// Не-аудио игнорируется, битые аудиофайлы пропускаются.
@@ -107,7 +112,42 @@ public enum LibraryScanner {
                 return match
             }
         }
-        return nil
+        // Узнаваемых имён нет — берём самую крупную картинку (передняя обложка
+        // почти всегда крупнее back/booklet/disc-иконок). При полном отсутствии
+        // картинок — nil.
+        return largestImage(among: candidates)
+    }
+
+    /// Самая крупная картинка по разрешению (ширина×высота через ImageIO без
+    /// полного декода); тай-брейк — размер файла. `urls` отсортированы по имени
+    /// по возрастанию, поэтому при равном счёте остаётся алфавитно первая
+    /// (детерминизм). Нечитаемые как изображение получают счёт (0, …).
+    private static func largestImage(among urls: [URL]) -> URL? {
+        var best: URL?
+        var bestScore = (-1, -1)
+        for url in urls {
+            let score = (pixelCount(url) ?? 0, fileSize(url))
+            if score.0 > bestScore.0
+                || (score.0 == bestScore.0 && score.1 > bestScore.1) {
+                best = url
+                bestScore = score
+            }
+        }
+        return best
+    }
+
+    private static func pixelCount(_ url: URL) -> Int? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil)
+                as? [CFString: Any],
+              let width = props[kCGImagePropertyPixelWidth] as? Int,
+              let height = props[kCGImagePropertyPixelHeight] as? Int
+        else { return nil }
+        return width * height
+    }
+
+    private static func fileSize(_ url: URL) -> Int {
+        (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
     }
 
     /// Сбой перечисления корня скана — настоящий throw; недоступная
