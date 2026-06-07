@@ -64,4 +64,26 @@ import Foundation
         #expect(override.year == nil)
         #expect(override.trackNumber == nil)
     }
+
+    @Test func decodesArtworkOnlyWithoutTracksKey() throws {
+        // Реалистичный кейс: правка только обложки, ключа `tracks` нет вовсе.
+        // Синтезированный init(from:) кинул бы keyNotFound; кастомный — нет.
+        let json = """
+        {"version": 1, "artworkFileName": "edited.jpg"}
+        """
+        let sidecar = try JSONDecoder().decode(
+            AlbumSidecar.self, from: Data(json.utf8))
+        #expect(sidecar.version == 1)
+        #expect(sidecar.artworkFileName == "edited.jpg")
+        #expect(sidecar.tracks.isEmpty)
+    }
+
+    @Test func decodesBareVersionOnly() throws {
+        // Ни tracks, ни artworkFileName — оба опциональны при чтении.
+        let sidecar = try JSONDecoder().decode(
+            AlbumSidecar.self, from: Data(#"{"version":2}"#.utf8))
+        #expect(sidecar.version == 2)
+        #expect(sidecar.artworkFileName == nil)
+        #expect(sidecar.tracks.isEmpty)
+    }
 }

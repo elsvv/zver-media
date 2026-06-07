@@ -191,6 +191,26 @@ import Foundation
         #expect(infos.first?.artworkFileURL?.lastPathComponent == "edited.jpg")
     }
 
+    @Test func sidecarArtworkOnlyWithoutTracksKeyApplies() async throws {
+        // Правка только обложки на Маке: sidecar без ключа `tracks` вовсе.
+        // Раньше такой sidecar не декодировался (keyNotFound) и молча
+        // отбрасывался — обложка не подхватывалась. Теперь должен примениться.
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        let sub = tmp.appendingPathComponent("Альбом")
+        try FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(
+            at: fixture("notags.flac"), to: sub.appendingPathComponent("notags.flac"))
+        try Data([0xFF, 0xD8, 0xFF]).write(to: sub.appendingPathComponent("edited.jpg"))
+        try writeSidecar("""
+        {"version":1,"artworkFileName":"edited.jpg"}
+        """, into: sub)
+
+        let infos = try await LibraryScanner.scan(directory: tmp)
+        #expect(infos.count == 1)
+        #expect(infos.first?.artworkFileURL?.lastPathComponent == "edited.jpg")
+    }
+
     @Test func sidecarJSONNotScannedAsAudio() async throws {
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
