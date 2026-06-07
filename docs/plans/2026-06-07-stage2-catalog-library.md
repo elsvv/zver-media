@@ -42,7 +42,7 @@ S2-6 LibraryStore поверх каталога → S2-7 Экраны → S2-8 �
 **Files:** Create: `Sources/ZverCore/Catalog/CatalogStore.swift`; Test: `Tests/ZverCoreTests/CatalogStoreTests.swift`
 
 API (все методы синхронные, вызываются с фоновой очереди LibraryStore):
-- `reconcile(scanned: [TrackRecord])` — upsert всех + DELETE треков, чьих relativePath нет в scanned (файл удалён). Плейлисты чистятся каскадом.
+- `reconcile(scanned: [TrackRecord])` — upsert всех + DELETE треков, чьих relativePath нет в scanned (файл удалён). Плейлисты чистятся каскадом. Контракт: `addedAt` существующих треков НЕ перезаписывается (upsert с `Column("addedAt").noOverwrite`) — фоновый рескан при каждом старте не должен сбрасывать дату добавления на время последнего скана.
 - `allTracks(documentsURL:) -> [Track]`
 - `search(_ query: String, documentsURL:) -> [Track]` — LIKE по title/artist/album, escape `%_`, пустой запрос → [].
 - TDD: reconcile добавляет/обновляет/удаляет; поиск находит по подстроке без регистра (включая кириллицу через LOWER? — SQLite LOWER не умеет кириллицу: использовать `localizedCaseInsensitiveContains` поверх выборки ИЛИ хранить нормализованные колонки; для MVP — фильтр в Swift по выбранным allTracks, это честно задокументировать).

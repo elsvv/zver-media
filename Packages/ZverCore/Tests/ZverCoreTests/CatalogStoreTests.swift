@@ -39,6 +39,29 @@ import Testing
         #expect(tracks.first?.title == "Новое имя")
     }
 
+    @Test func reconcileOfExistingPathPreservesOriginalAddedAt() throws {
+        let catalog = try Catalog.inMemory()
+        let store = CatalogStore(catalog: catalog)
+        let originalAddedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        try store.reconcile(scanned: [
+            TrackRecord(relativePath: "a.flac", title: "Старое имя",
+                        duration: 1, sampleRate: 44100, addedAt: originalAddedAt)
+        ])
+
+        // Повторный рескан: маппинг сканера ставит дефолтный addedAt = Date(),
+        // но дата добавления существующего трека не должна сбрасываться.
+        try store.reconcile(scanned: [
+            TrackRecord(relativePath: "a.flac", title: "Новое имя",
+                        duration: 1, sampleRate: 44100)
+        ])
+
+        let stored = try catalog.dbQueue.read { db in
+            try TrackRecord.fetchOne(db, key: "a.flac")
+        }
+        #expect(stored?.title == "Новое имя")
+        #expect(stored?.addedAt == originalAddedAt)
+    }
+
     @Test func reconcileDeletesMissingTracks() throws {
         let catalog = try Catalog.inMemory()
         let store = CatalogStore(catalog: catalog)

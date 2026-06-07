@@ -16,10 +16,19 @@ public final class CatalogStore: Sendable {
     /// upsert всех записей и удаление треков, чьих relativePath нет
     /// в `scanned` (файлы удалены). Плейлистные связи чистятся
     /// каскадом (ON DELETE CASCADE).
+    ///
+    /// Контракт: `addedAt` существующих треков сохраняется — фоновый
+    /// рескан при каждом старте не должен сбрасывать дату добавления
+    /// на время последнего скана (маппинг сканера ставит дефолтный
+    /// `addedAt = Date()`).
     public func reconcile(scanned: [TrackRecord]) throws {
         try catalog.dbQueue.write { db in
             for record in scanned {
-                try record.upsert(db)
+                // noOverwrite: при конфликте addedAt остаётся исходным,
+                // остальные колонки перезаписываются значениями скана.
+                _ = try record.upsertAndFetch(db) { _ in
+                    [Column("addedAt").noOverwrite]
+                }
             }
             let scannedPaths = Set(scanned.map(\.relativePath))
             let existingPaths = try String.fetchAll(
