@@ -64,15 +64,24 @@ final class LibraryStore: ObservableObject {
         }
 
         let rescanned = await Task.detached(priority: .userInitiated) { () -> [Track]? in
-            guard let infos = try? await LibraryScanner.scan(directory: documentsURL)
-            else { return nil }
-            let records = infos.compactMap {
-                Self.record(from: $0, documentsURL: documentsURL)
-            }
             do {
-                try catalogStore.reconcile(scanned: records)
+                let infos = try await LibraryScanner.scan(directory: documentsURL)
+                let records = infos.compactMap {
+                    Self.record(from: $0, documentsURL: documentsURL)
+                }
+                // keepMissing: трек выпал из скана, но файл на месте —
+                // не прочитался (частично скопирован через file sharing,
+                // временный сбой чтения). Удаление потеряло бы addedAt
+                // и плейлистные связи (каскад) безвозвратно.
+                try catalogStore.reconcile(scanned: records, keepMissing: {
+                    FileManager.default.fileExists(
+                        atPath: documentsURL.appendingPathComponent($0).path
+                    )
+                })
                 return try catalogStore.allTracks(documentsURL: documentsURL)
             } catch {
+                // Скан корня (директория недоступна) или сверка упали —
+                // это не «пустая библиотека», каталог не трогаем.
                 return nil
             }
         }.value

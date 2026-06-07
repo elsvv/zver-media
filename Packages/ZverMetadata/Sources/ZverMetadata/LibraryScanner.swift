@@ -16,8 +16,12 @@ public enum LibraryScanner {
     /// У файлов без встроенной обложки artworkFileURL указывает на файл
     /// cover/folder/front/albumart (jpg/jpeg/png) из папки трека, если есть.
     /// Результат отсортирован по пути файла.
+    ///
+    /// Бросает, если корневую директорию невозможно перечислить
+    /// (отсутствует/нечитаема): такой сбой — не «пустая библиотека»,
+    /// вызывающий код не должен принимать его за реальный результат.
     public static func scan(directory: URL) async throws -> [AudioFileInfo] {
-        let urls = audioURLs(in: directory).sorted { $0.path < $1.path }
+        let urls = try audioURLs(in: directory).sorted { $0.path < $1.path }
         let rootPath = directory.standardizedFileURL.path
         var infos: [AudioFileInfo] = []
         var artworkByFolder: [String: URL?] = [:]
@@ -58,11 +62,26 @@ public enum LibraryScanner {
         return nil
     }
 
-    private static func audioURLs(in directory: URL) -> [URL] {
+    /// Сбой перечисления корня скана — настоящий throw; недоступная
+    /// поддиректория пропускается (её файлы остаются на диске и не должны
+    /// валить скан целиком).
+    private static func audioURLs(in directory: URL) throws -> [URL] {
+        let rootPath = directory.standardizedFileURL.path
+        var rootError: Error?
         guard let enumerator = FileManager.default.enumerator(
             at: directory,
-            includingPropertiesForKeys: [.isRegularFileKey]
-        ) else { return [] }
+            includingPropertiesForKeys: [.isRegularFileKey],
+            errorHandler: { url, error in
+                if url.standardizedFileURL.path == rootPath {
+                    rootError = error
+                    return false
+                }
+                return true
+            }
+        ) else {
+            throw CocoaError(.fileReadUnknown,
+                             userInfo: [NSFilePathErrorKey: rootPath])
+        }
 
         var urls: [URL] = []
         for case let url as URL in enumerator {
@@ -71,6 +90,7 @@ public enum LibraryScanner {
             else { continue }
             urls.append(url)
         }
+        if let rootError { throw rootError }
         return urls
     }
 }

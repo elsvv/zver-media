@@ -18,6 +18,17 @@ import Foundation
         #expect(infos.allSatisfy { ["flac", "m4a"].contains($0.url.pathExtension) })
         #expect(infos.map(\.url.path) == infos.map(\.url.path).sorted())
     }
+    @Test func scanThrowsWhenDirectoryMissing() async {
+        // Сбой перечисления корня (директории нет/нечитаема) — реальная
+        // ошибка, а не «пустая библиотека»: иначе сверка с каталогом
+        // стёрла бы все треки и плейлисты.
+        let missing = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+
+        await #expect(throws: (any Error).self) {
+            _ = try await LibraryScanner.scan(directory: missing)
+        }
+    }
     @Test func emptyDirGivesEmptyResult() async throws {
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)

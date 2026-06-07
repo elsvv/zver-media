@@ -17,11 +17,21 @@ public final class CatalogStore: Sendable {
     /// в `scanned` (файлы удалены). Плейлистные связи чистятся
     /// каскадом (ON DELETE CASCADE).
     ///
+    /// `keepMissing` вызывается только для путей, отсутствующих в
+    /// `scanned`: true — запись сохраняется как есть. Так различаются
+    /// «файл удалён с диска» и «файл на месте, но не прочитался при
+    /// скане» (частично скопирован через file sharing, временный сбой
+    /// чтения) — во втором случае удаление потеряло бы `addedAt`
+    /// и плейлистные связи безвозвратно.
+    ///
     /// Контракт: `addedAt` существующих треков сохраняется — фоновый
     /// рескан при каждом старте не должен сбрасывать дату добавления
     /// на время последнего скана (маппинг сканера ставит дефолтный
     /// `addedAt = Date()`).
-    public func reconcile(scanned: [TrackRecord]) throws {
+    public func reconcile(
+        scanned: [TrackRecord],
+        keepMissing: (String) -> Bool = { _ in false }
+    ) throws {
         try catalog.dbQueue.write { db in
             for record in scanned {
                 // noOverwrite: при конфликте addedAt остаётся исходным,
@@ -34,7 +44,9 @@ public final class CatalogStore: Sendable {
             let existingPaths = try String.fetchAll(
                 db, sql: "SELECT relativePath FROM track"
             )
-            let removedPaths = existingPaths.filter { !scannedPaths.contains($0) }
+            let removedPaths = existingPaths.filter {
+                !scannedPaths.contains($0) && !keepMissing($0)
+            }
             try TrackRecord.deleteAll(db, keys: removedPaths)
         }
     }

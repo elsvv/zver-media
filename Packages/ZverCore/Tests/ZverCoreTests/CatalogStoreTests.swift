@@ -87,6 +87,58 @@ import Testing
         #expect(try store.allTracks(documentsURL: documents).isEmpty)
     }
 
+    @Test func reconcileKeepsMissingTrackWhenPredicateSaysFilePresent() throws {
+        // a.flac есть на диске, но не прочитался при скане (например,
+        // частично скопирован через file sharing) — запись не удаляется,
+        // addedAt и плейлистные связи сохраняются. b.flac пропал
+        // по-настоящему — удаляется как раньше.
+        let catalog = try Catalog.inMemory()
+        let store = CatalogStore(catalog: catalog)
+        let originalAddedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        try store.reconcile(scanned: [
+            TrackRecord(relativePath: "a.flac", title: "А",
+                        duration: 1, sampleRate: 44100, addedAt: originalAddedAt),
+            record(path: "b.flac", title: "Б"),
+        ])
+        try catalog.dbQueue.write { db in
+            try db.execute(sql: "INSERT INTO playlist (title, createdAt) VALUES ('Микс', ?)",
+                           arguments: [Date()])
+            try db.execute(
+                sql: "INSERT INTO playlistTrack (playlistId, trackRelativePath, position) VALUES (1, 'a.flac', 0)"
+            )
+        }
+
+        try store.reconcile(scanned: [], keepMissing: { $0 == "a.flac" })
+
+        #expect(try store.allTracks(documentsURL: documents).map(\.title) == ["А"])
+        let stored = try catalog.dbQueue.read { db in
+            try TrackRecord.fetchOne(db, key: "a.flac")
+        }
+        #expect(stored?.addedAt == originalAddedAt)
+        let memberships = try catalog.dbQueue.read { db in
+            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM playlistTrack") ?? -1
+        }
+        #expect(memberships == 1)
+    }
+
+    @Test func reconcileDoesNotConsultPredicateForScannedPaths() throws {
+        // keepMissing — только про отсутствующие в скане пути:
+        // отсканированные записи обновляются обычным upsert'ом.
+        let catalog = try Catalog.inMemory()
+        let store = CatalogStore(catalog: catalog)
+        try store.reconcile(scanned: [record(path: "a.flac", title: "Старое имя")])
+
+        try store.reconcile(
+            scanned: [record(path: "a.flac", title: "Новое имя")],
+            keepMissing: { _ in
+                Issue.record("keepMissing не должен вызываться для отсканированных путей")
+                return true
+            }
+        )
+
+        #expect(try store.allTracks(documentsURL: documents).map(\.title) == ["Новое имя"])
+    }
+
     @Test func reconcileDeleteCascadesIntoPlaylistTrack() throws {
         let catalog = try Catalog.inMemory()
         let store = CatalogStore(catalog: catalog)
