@@ -3,14 +3,15 @@ import Combine
 import ZverTransport
 
 /// `@MainActor`-координатор сетевой раздачи: связывает исходящую очередь,
-/// файловый сервер, Bonjour-анонс, sync-host и pairing-контроллер.
+/// файловый сервер, sync-host и pairing-контроллер.
 ///
-/// Запускает `FileServer` при непустой очереди и публикует `_zver._tcp` через
-/// `NWServiceAdvertiser` на фактическом порту сервера. Пустеет очередь — сервер
-/// и анонс останавливаются. Все сетевые колбэки (`onReady`/`onConfirm`/
-/// `onTokenIssued`) — `@Sendable`, переход в эту `@MainActor`-модель делается
-/// через `Task { @MainActor in … }` (краш-класс Swift 6: не наследуем UI-изоляцию
-/// в сетевые очереди).
+/// Запускает `FileServer` при непустой очереди; сервер сам публикует `_zver._tcp`
+/// на ТОМ ЖЕ `NWListener`, что слушает соединения (один слушатель и принимает, и
+/// анонсирует — так задумано в Network.framework; второй слушатель на том же
+/// порту дал бы EADDRINUSE). Пустеет очередь — сервер и анонс останавливаются.
+/// Все сетевые колбэки (`onReady`/`onConfirm`/`onTokenIssued`) — `@Sendable`,
+/// переход в эту `@MainActor`-модель делается через `Task { @MainActor in … }`
+/// (краш-класс Swift 6: не наследуем UI-изоляцию в сетевые очереди).
 ///
 /// На ЭТОЙ машине раздачу не гоняем (только компиляция таргета). `autoStart`
 /// позволяет отключить реальный запуск слушателя в превью/тестах сборки.
@@ -32,7 +33,6 @@ final class ServerCoordinator: ObservableObject {
 
     private let queue: OutgoingQueue
     private let host: SyncHost
-    private let advertiser: ServiceAdvertiser
     private let fileServer: FileServer
     /// Имя сервиса в Bonjour/TXT (имя Мака).
     private let serviceName: String
@@ -42,7 +42,6 @@ final class ServerCoordinator: ObservableObject {
     private var cancellables: Set<AnyCancellable> = []
 
     init(queue: OutgoingQueue,
-         advertiser: ServiceAdvertiser = NWServiceAdvertiser(),
          serviceName: String = PairingHostController.defaultServiceName,
          autoStart: Bool = true) {
         let state = HostState()
@@ -50,7 +49,6 @@ final class ServerCoordinator: ObservableObject {
 
         self.queue = queue
         self.host = host
-        self.advertiser = advertiser
         self.serviceName = serviceName
         self.autoStart = autoStart
         self.pairing = PairingHostController(state: state, serviceName: serviceName)
@@ -102,29 +100,19 @@ final class ServerCoordinator: ObservableObject {
         }
     }
 
-    /// Стартует сервер (если ещё не запущен) и публикует Bonjour на его порту.
+    /// Стартует сервер (если ещё не запущен). Сервер сам публикует `_zver._tcp`
+    /// на своём слушателе (имя Мака + TXT) — без второго bind на тот же порт.
     private func startIfNeeded() {
         if case .running = status { return }
 
-        let advertiser = self.advertiser
-        let serviceName = self.serviceName
-
         fileServer.start(
+            serviceName: serviceName,
+            txt: ["name": serviceName, "v": String(SyncManifest.currentProtocolVersion)],
             onReady: { port in
-                // На сетевой очереди → в @MainActor: анонсируем сервис и
-                // фиксируем статус.
+                // На сетевой очереди → в @MainActor: фиксируем статус (Bonjour
+                // уже опубликован самим слушателем до его старта).
                 Task { @MainActor [weak self] in
-                    guard let self else { return }
-                    do {
-                        try advertiser.start(
-                            port: port,
-                            name: serviceName,
-                            txt: ["name": serviceName, "v": String(SyncManifest.currentProtocolVersion)]
-                        )
-                        self.status = .running(port: port)
-                    } catch {
-                        self.status = .failed("Не удалось опубликовать сервис в сети.")
-                    }
+                    self?.status = .running(port: port)
                 }
             },
             onFailure: { _ in
@@ -135,10 +123,9 @@ final class ServerCoordinator: ObservableObject {
         )
     }
 
-    /// Останавливает сервер и анонс.
+    /// Останавливает сервер (со снятием Bonjour-анонса вместе со слушателем).
     func stop() {
         fileServer.stop()
-        advertiser.stop()
         status = .stopped
     }
 

@@ -14,6 +14,10 @@ import ZverTransport
 /// Авторизация `X-Zver-Token` обязательна на всех маршрутах, кроме `/pair`.
 /// Один доверенный клиент в LAN; принимаются только GET и POST pair/confirm.
 ///
+/// Bonjour: этот же слушатель публикует `_zver._tcp` (через `listener.service`),
+/// если в `start(serviceName:txt:)` передано имя сервиса — отдельный второй
+/// `NWListener` на том же порту не нужен (он дал бы EADDRINUSE).
+///
 /// Concurrency (краш-класс Swift 6): ВСЕ колбэки `NWListener`/`NWConnection` —
 /// `@Sendable`, исполняются на сетевой очереди `queue`. Чтение раздаваемого
 /// состояния и проверка токенов — потокобезопасно через `HostState` (под замком),
@@ -47,9 +51,17 @@ final class FileServer: @unchecked Sendable {
     // MARK: - Жизненный цикл слушателя
 
     /// Запускает сервер. `port` = nil → система выбирает свободный порт; его
-    /// фактическое значение приходит в `onReady` (для анонса Bonjour на том же
-    /// порту). Колбэки — `@Sendable`, на сетевой очереди.
+    /// фактическое значение приходит в `onReady`. Колбэки — `@Sendable`, на
+    /// сетевой очереди.
+    ///
+    /// Bonjour-анонс вешается на ЭТОТ ЖЕ слушатель (`listener.service`) до старта —
+    /// один `NWListener` и принимает соединения, и публикует `_zver._tcp` с TXT.
+    /// Так задумано в Network.framework; отдельный второй слушатель на том же
+    /// порту дал бы EADDRINUSE (см. фикс ревью S3-9). Если `serviceName == nil` —
+    /// сервер слушает без публикации (превью/тесты сборки).
     func start(port: UInt16? = nil,
+               serviceName: String? = nil,
+               txt: [String: String] = [:],
                onReady: @escaping @Sendable (UInt16) -> Void,
                onFailure: @escaping @Sendable (Error) -> Void) {
         stop()
@@ -63,6 +75,15 @@ final class FileServer: @unchecked Sendable {
         } catch {
             onFailure(error)
             return
+        }
+
+        // Публикуем Bonjour на этом же слушателе — без второго bind на тот же порт.
+        if let serviceName {
+            listener.service = NWListener.Service(
+                name: serviceName,
+                type: zverServiceType,
+                txtRecord: NWTXTRecord(txt)
+            )
         }
 
         let chunkSize = self.chunkSize
