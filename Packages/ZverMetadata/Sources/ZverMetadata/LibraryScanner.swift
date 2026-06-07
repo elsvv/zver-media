@@ -7,12 +7,19 @@ public enum LibraryScanner {
 
     /// Рекурсивно обходит директорию, читает метаданные всех аудиофайлов.
     /// Не-аудио игнорируется, битые аудиофайлы пропускаются.
+    /// У файлов без тега ALBUM, лежащих не в корне скана, альбомом становится
+    /// имя непосредственной родительской папки.
     /// Результат отсортирован по пути файла.
     public static func scan(directory: URL) async throws -> [AudioFileInfo] {
         let urls = audioURLs(in: directory).sorted { $0.path < $1.path }
+        let rootPath = directory.standardizedFileURL.path
         var infos: [AudioFileInfo] = []
         for url in urls {
-            guard let info = try? await MetadataReader.read(url: url) else { continue }
+            guard var info = try? await MetadataReader.read(url: url) else { continue }
+            let parent = url.deletingLastPathComponent().standardizedFileURL
+            if info.album == nil, parent.path != rootPath {
+                info.album = parent.lastPathComponent
+            }
             infos.append(info)
         }
         return infos
