@@ -29,7 +29,9 @@ struct ContentView: View {
             .tabItem { Label("Поиск", systemImage: "magnifyingglass") }
 
             NavigationStack {
-                MacImportView()
+                // Рескан каталога после импорта альбома: reconcile подхватит
+                // правки из sidecar и добавит новые треки в библиотеку.
+                MacImportView(rescan: { await library.refresh() })
             }
             .safeAreaInset(edge: .bottom, spacing: 0) { miniPlayer }
             .tabItem { Label("Импорт", systemImage: "laptopcomputer.and.arrow.down") }

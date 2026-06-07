@@ -35,19 +35,38 @@ final class MacImportModel: ObservableObject {
     @Published private(set) var selectedMac: DiscoveredService?
     /// Текущая фаза сопряжения/предпросмотра.
     @Published private(set) var phase: PairingPhase = .idle
+    /// Активный координатор импорта (создаётся при старте загрузки очереди).
+    /// Пока nil — показываем предпросмотр; не-nil — экран прогресса импорта.
+    @Published private(set) var importCoordinator: ImportCoordinator?
 
     private let browser: ServiceBrowser
     private let keyStore: KeyStore
     /// Фабрика клиента по имени сервиса — инъектируется для тестируемости/превью.
     private let clientFactory: @Sendable (String) -> MacSyncClient
+    /// Фабрика загрузчика файлов по имени сервиса (рантайм-адаптер `NWConnection`).
+    private let downloaderFactory: @Sendable (String) -> RangeDownloading
+    /// Корень библиотеки на телефоне (`Documents/Library`) — куда раскладываем альбомы.
+    private let libraryRoot: URL
+    /// Папка частичных загрузок (вне скана библиотеки).
+    private let stagingRoot: URL
+    /// Рескан каталога после раскладки альбома (обёртка над `LibraryStore.refresh`).
+    private let rescan: @MainActor () async -> Void
     private var isBrowsing = false
 
     init(browser: ServiceBrowser = NWServiceBrowser(),
          keyStore: KeyStore = KeychainKeyStore(),
-         clientFactory: @escaping @Sendable (String) -> MacSyncClient = { MacSyncClient(serviceName: $0) }) {
+         clientFactory: @escaping @Sendable (String) -> MacSyncClient = { MacSyncClient(serviceName: $0) },
+         downloaderFactory: @escaping @Sendable (String) -> RangeDownloading = { NWFileDownloader(serviceName: $0) },
+         libraryRoot: URL = URL.documentsDirectory.appendingPathComponent("Library", isDirectory: true),
+         stagingRoot: URL = URL.cachesDirectory.appendingPathComponent("ZverImport", isDirectory: true),
+         rescan: @escaping @MainActor () async -> Void = {}) {
         self.browser = browser
         self.keyStore = keyStore
         self.clientFactory = clientFactory
+        self.downloaderFactory = downloaderFactory
+        self.libraryRoot = libraryRoot
+        self.stagingRoot = stagingRoot
+        self.rescan = rescan
     }
 
     // MARK: - Обнаружение
@@ -149,6 +168,60 @@ final class MacImportModel: ObservableObject {
                 phase = .failed(Self.message(for: error))
             }
         }
+    }
+
+    // MARK: - Импорт очереди
+
+    /// Запускает докачиваемую загрузку очереди Мака: строит координатор и
+    /// стартует его. Доступно только из фазы `.ready(manifest)` с валидным токеном
+    /// для выбранного Мака. Повторный вызов при активном координаторе — no-op.
+    func startImport() {
+        guard importCoordinator == nil,
+              let mac = selectedMac,
+              case let .ready(manifest) = phase,
+              let token = keyStore.token(forService: serviceKey(for: mac))
+        else { return }
+
+        let serviceName = mac.name
+        let downloader = downloaderFactory(serviceName)
+        let engine = DownloadEngine(
+            libraryRoot: libraryRoot,
+            stagingRoot: stagingRoot,
+            downloader: downloader,
+            token: token
+        )
+
+        // Клиент для confirm — отдельный короткоживущий, как и для pair/manifest.
+        let confirmClientFactory = clientFactory
+        let confirm: @Sendable (String) async throws -> Void = { albumId in
+            try await confirmClientFactory(serviceName).confirm(albumId: albumId, token: token)
+        }
+
+        // Локальные sha считаем вне главного потока (хеширование лежащих файлов).
+        let localShas: @Sendable () async -> [String: String] = {
+            await Task.detached(priority: .userInitiated) {
+                ImportCoordinator.computeLocalShas(manifest: manifest, engine: engine)
+            }.value
+        }
+
+        let rescan = self.rescan
+        let coordinator = ImportCoordinator(
+            manifest: manifest,
+            engine: engine,
+            confirm: confirm,
+            rescan: rescan,
+            localShas: localShas
+        )
+        importCoordinator = coordinator
+
+        Task { @MainActor in
+            await coordinator.start()
+        }
+    }
+
+    /// Закрывает экран прогресса импорта и возвращается к предпросмотру очереди.
+    func dismissImport() {
+        importCoordinator = nil
     }
 
     // MARK: - Сообщения об ошибках

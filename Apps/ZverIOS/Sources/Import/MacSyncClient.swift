@@ -17,6 +17,14 @@ import ZverTransport
 ///
 /// `@unchecked Sendable` оправдан: всё мутабельное состояние живёт на приватной
 /// последовательной очереди `queue`.
+/// Тело `POST /confirm { albumId }`. Локальный Codable в app-таргете: сериализует
+/// JSON `{ "albumId": "..." }`, который Мак (S3-9) декодирует своей стороной. В
+/// `ZverTransport` не выносится сознательно — чтобы правка S3-11 не пересекалась с
+/// общим пакетом (коммитим только `Apps/ZverIOS/`); форма поля — часть протокола.
+struct ConfirmRequest: Codable, Equatable, Sendable {
+    var albumId: String
+}
+
 final class MacSyncClient: @unchecked Sendable {
     /// Сетевые ошибки клиента — диагностируемые причины сбоя запроса.
     enum ClientError: Error, Sendable {
@@ -78,6 +86,20 @@ final class MacSyncClient: @unchecked Sendable {
             throw ClientError.decodingFailed
         }
         return manifest
+    }
+
+    /// `POST /confirm { albumId }` с авторизацией `X-Zver-Token` → 200.
+    ///
+    /// Шлётся ТОЛЬКО когда все треки и обложка альбома разложены и сверены по
+    /// sha256. Мак, получив подтверждение, убирает альбом из исходящей очереди.
+    func confirm(albumId: String, token: String) async throws {
+        let body = try JSONEncoder().encode(ConfirmRequest(albumId: albumId))
+        _ = try await send(
+            method: "POST",
+            path: "/confirm",
+            token: token,
+            body: body
+        )
     }
 
     // MARK: - Сырой HTTP поверх NWConnection
