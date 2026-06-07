@@ -44,4 +44,22 @@ public struct AlbumSidecar: Codable, Sendable {
         self.artworkFileName = artworkFileName
         self.tracks = tracks
     }
+
+    private enum CodingKeys: String, CodingKey {
+        case version, artworkFileName, tracks
+    }
+
+    /// Кастомный декод: `artworkFileName` и `tracks` опциональны при чтении.
+    /// Синтезированный `init(from:)` НЕ применяет дефолты из memberwise-init,
+    /// поэтому sidecar без ключа `tracks` (например, правка только обложки —
+    /// `{"version":1,"artworkFileName":"edited.jpg"}`) иначе не декодировался
+    /// бы и молча отбрасывался вместе с обложкой.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.version = try container.decode(Int.self, forKey: .version)
+        self.artworkFileName = try container.decodeIfPresent(
+            String.self, forKey: .artworkFileName)
+        self.tracks = try container.decodeIfPresent(
+            [String: TrackOverride].self, forKey: .tracks) ?? [:]
+    }
 }
