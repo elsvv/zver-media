@@ -12,10 +12,11 @@ public struct Track: Identifiable, Equatable, Hashable, Sendable {
     public var sampleRate: Double  // Гц
     public var bitDepth: Int?
     public var fileExtension: String
+    public var artworkFileURL: URL?   // обложка из файла в папке (folder.jpg и т.п.)
 
     public init(url: URL, title: String, artist: String? = nil, album: String? = nil,
                 trackNumber: Int? = nil, year: Int? = nil, duration: Double,
-                sampleRate: Double, bitDepth: Int? = nil) {
+                sampleRate: Double, bitDepth: Int? = nil, artworkFileURL: URL? = nil) {
         self.id = url.path
         self.url = url
         self.title = title
@@ -27,5 +28,6 @@ public struct Track: Identifiable, Equatable, Hashable, Sendable {
         self.sampleRate = sampleRate
         self.bitDepth = bitDepth
         self.fileExtension = url.pathExtension.lowercased()
+        self.artworkFileURL = artworkFileURL
     }
 }
