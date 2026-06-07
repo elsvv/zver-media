@@ -3,9 +3,12 @@ import ZverCore
 
 struct ContentView: View {
     @StateObject private var engine = PlayerEngine()
-    @StateObject private var library = LibraryStore(
-        catalogStore: CatalogStore(catalog: LibraryStore.openCatalog())
-    )
+    // Каталог один: треки и плейлисты живут в одной БД (FK-связи).
+    @StateObject private var library: LibraryStore = {
+        let catalog = LibraryStore.openCatalog()
+        return LibraryStore(catalogStore: CatalogStore(catalog: catalog),
+                            playlistStore: PlaylistStore(catalog: catalog))
+    }()
 
     var body: some View {
         TabView {

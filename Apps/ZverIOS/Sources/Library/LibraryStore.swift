@@ -8,11 +8,17 @@ import ZverMetadata
 /// Старт: мгновенный publish альбомов из каталога → фоновый рескан
 /// Documents → reconcile → republish. Pull-to-refresh — тот же рескан.
 /// Ошибка скана не затирает уже опубликованный список.
+///
+/// Плейлисты: publish списка здесь же; все мутации (создание,
+/// переименование, удаление, состав) — обёртки над PlaylistStore
+/// с чтением/записью вне главного потока и republish после изменения.
 @MainActor
 final class LibraryStore: ObservableObject {
     @Published private(set) var albums: [AlbumGroup] = []
+    @Published private(set) var playlists: [Playlist] = []
 
     private let catalogStore: CatalogStore
+    private let playlistStore: PlaylistStore
     private let documentsURL: URL
 
     /// Guard от параллельных refresh: .task и .refreshable могут
@@ -20,8 +26,10 @@ final class LibraryStore: ObservableObject {
     private var isRefreshing = false
     private var didPublishCatalog = false
 
-    init(catalogStore: CatalogStore, documentsURL: URL = .documentsDirectory) {
+    init(catalogStore: CatalogStore, playlistStore: PlaylistStore,
+         documentsURL: URL = .documentsDirectory) {
         self.catalogStore = catalogStore
+        self.playlistStore = playlistStore
         self.documentsURL = documentsURL
     }
 
@@ -63,6 +71,11 @@ final class LibraryStore: ObservableObject {
             }
         }
 
+        // Плейлисты живут в том же каталоге: публикуем вместе с альбомами,
+        // чтобы подменю «В плейлист…» и раздел «Плейлисты» были готовы
+        // сразу после старта.
+        await refreshPlaylists()
+
         let rescanned = await Task.detached(priority: .userInitiated) { () -> [Track]? in
             do {
                 let infos = try await LibraryScanner.scan(directory: documentsURL)
@@ -103,6 +116,96 @@ final class LibraryStore: ObservableObject {
             (try? catalogStore.search(query, documentsURL: documentsURL)) ?? []
         }.value
     }
+
+    // MARK: - Плейлисты
+
+    /// Перечитывает плейлисты из каталога и публикует список.
+    /// Ошибка чтения не затирает уже опубликованный список.
+    func refreshPlaylists() async {
+        let playlistStore = self.playlistStore
+        let fetched = await Task.detached(priority: .userInitiated) {
+            try? playlistStore.allPlaylists()
+        }.value
+        if let fetched {
+            playlists = fetched
+        }
+    }
+
+    /// Создаёт плейлист и публикует обновлённый список.
+    /// Пустое/пробельное имя или ошибка записи → nil.
+    @discardableResult
+    func createPlaylist(title: String) async -> Playlist? {
+        let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else { return nil }
+        let playlistStore = self.playlistStore
+        let created = await Task.detached(priority: .userInitiated) {
+            try? playlistStore.createPlaylist(title: title)
+        }.value
+        await refreshPlaylists()
+        return created
+    }
+
+    /// Переименовывает плейлист (пустое имя — no-op) и публикует список.
+    func renamePlaylist(id: Int64, title: String) async {
+        let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else { return }
+        let playlistStore = self.playlistStore
+        await Task.detached(priority: .userInitiated) {
+            _ = try? playlistStore.renamePlaylist(id: id, title: title)
+        }.value
+        await refreshPlaylists()
+    }
+
+    /// Удаляет плейлист (состав чистится каскадом) и публикует список.
+    func deletePlaylist(id: Int64) async {
+        let playlistStore = self.playlistStore
+        await Task.detached(priority: .userInitiated) {
+            _ = try? playlistStore.deletePlaylist(id: id)
+        }.value
+        await refreshPlaylists()
+    }
+
+    /// Треки плейлиста по позициям. Ошибка чтения → [].
+    func playlistTracks(id: Int64) async -> [Track] {
+        let playlistStore = self.playlistStore
+        let documentsURL = self.documentsURL
+        return await Task.detached(priority: .userInitiated) {
+            (try? playlistStore.tracks(in: id, documentsURL: documentsURL)) ?? []
+        }.value
+    }
+
+    /// Добавляет трек в конец плейлиста (дубликат игнорируется).
+    /// Трек вне Documents (не должно случаться) — no-op.
+    func addToPlaylist(track: Track, playlistId: Int64) async {
+        guard let path = Self.relativePath(of: track.url, from: documentsURL)
+        else { return }
+        let playlistStore = self.playlistStore
+        await Task.detached(priority: .userInitiated) {
+            _ = try? playlistStore.add(trackPath: path, to: playlistId)
+        }.value
+    }
+
+    /// Убирает трек из плейлиста (позиции перенумеровываются в сторе).
+    func removeFromPlaylist(track: Track, playlistId: Int64) async {
+        guard let path = Self.relativePath(of: track.url, from: documentsURL)
+        else { return }
+        let playlistStore = self.playlistStore
+        await Task.detached(priority: .userInitiated) {
+            _ = try? playlistStore.remove(trackPath: path, from: playlistId)
+        }.value
+    }
+
+    /// Переставляет трек на позицию `position` в плейлисте.
+    func moveInPlaylist(track: Track, playlistId: Int64, to position: Int) async {
+        guard let path = Self.relativePath(of: track.url, from: documentsURL)
+        else { return }
+        let playlistStore = self.playlistStore
+        await Task.detached(priority: .userInitiated) {
+            _ = try? playlistStore.move(trackPath: path, in: playlistId, to: position)
+        }.value
+    }
+
+    // MARK: - Маппинг записей
 
     /// AudioFileInfo → строка каталога: пути относительные от Documents.
     /// Файл вне Documents (не должно случаться) — пропускается.

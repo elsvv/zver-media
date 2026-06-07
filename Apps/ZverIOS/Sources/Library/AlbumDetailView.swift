@@ -6,6 +6,7 @@ import ZverCore
 /// Тап по треку — воспроизведение альбома с него.
 struct AlbumDetailView: View {
     let group: AlbumGroup
+    @ObservedObject var store: LibraryStore
     @ObservedObject var engine: PlayerEngine
 
     var body: some View {
@@ -21,6 +22,7 @@ struct AlbumDetailView: View {
                     } label: {
                         trackRow(track, fallbackNumber: index + 1)
                     }
+                    .addToPlaylistMenu(for: track, store: store)
                 }
             }
         }

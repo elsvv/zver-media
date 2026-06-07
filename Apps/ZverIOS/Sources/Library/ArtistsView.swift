@@ -16,6 +16,7 @@ struct ArtistsView: View {
                 AlbumsGridView(
                     title: artist ?? Self.unknownArtistName,
                     albums: albums(of: artist),
+                    store: store,
                     engine: engine
                 )
             } label: {

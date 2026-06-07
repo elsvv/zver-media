@@ -16,6 +16,7 @@ struct SongsView: View {
                     } label: {
                         trackRow(track)
                     }
+                    .addToPlaylistMenu(for: track, store: store)
                 }
             } header: {
                 albumHeader(group)

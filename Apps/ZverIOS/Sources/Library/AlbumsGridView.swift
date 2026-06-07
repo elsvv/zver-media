@@ -6,6 +6,7 @@ import ZverCore
 struct AlbumsGridView: View {
     let title: String
     let albums: [AlbumGroup]
+    @ObservedObject var store: LibraryStore
     @ObservedObject var engine: PlayerEngine
 
     private static let columns = [
@@ -18,7 +19,7 @@ struct AlbumsGridView: View {
             LazyVGrid(columns: Self.columns, spacing: 20) {
                 ForEach(albums, id: \.album) { group in
                     NavigationLink {
-                        AlbumDetailView(group: group, engine: engine)
+                        AlbumDetailView(group: group, store: store, engine: engine)
                     } label: {
                         cell(for: group)
                     }

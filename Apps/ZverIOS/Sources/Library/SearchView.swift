@@ -49,6 +49,7 @@ struct SearchView: View {
                         NavigationLink {
                             AlbumsGridView(title: artist,
                                            albums: albums(of: artist),
+                                           store: store,
                                            engine: engine)
                         } label: {
                             Label(artist, systemImage: "music.mic")
@@ -60,7 +61,7 @@ struct SearchView: View {
                 Section("Альбомы") {
                     ForEach(albums, id: \.album) { group in
                         NavigationLink {
-                            AlbumDetailView(group: group, engine: engine)
+                            AlbumDetailView(group: group, store: store, engine: engine)
                         } label: {
                             albumRow(group)
                         }
@@ -74,6 +75,7 @@ struct SearchView: View {
                     } label: {
                         trackRow(track)
                     }
+                    .addToPlaylistMenu(for: track, store: store)
                 }
             }
         }
