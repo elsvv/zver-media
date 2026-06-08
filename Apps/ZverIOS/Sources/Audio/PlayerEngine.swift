@@ -14,6 +14,27 @@ final class PlayerEngine: ObservableObject {
     private let engine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
     private var file: AVAudioFile?
+
+    /// Режим паузы (этап 5): «всегда на связи» держит приложение живым на паузе
+    /// тишиной keep-alive (пульт принимает команды), «экономный» — поведение
+    /// этапов 1–4. Персистится в `UserDefaults`. Смена режима применяется со
+    /// следующей паузы (не трогает текущее воспроизведение).
+    @Published var pauseMode: PauseMode {
+        didSet {
+            guard pauseMode != oldValue else { return }
+            pauseModeStore.save(pauseMode)
+            // Режим переключили, пока стоим на паузе: привести keep-alive в
+            // соответствие новому режиму немедленно.
+            if state == .paused {
+                applyKeepAliveForCurrentPause()
+            }
+        }
+    }
+    private let pauseModeStore: PauseModeStore
+
+    /// Silent keep-alive для режима «всегда на связи»: отдельная нода тишины на
+    /// том же движке, не вмешивается в gapless-бухгалтерию основного player.
+    private lazy var keepAlive = KeepAlivePlayer(engine: engine)
     private var startFrame: AVAudioFramePosition = 0
     private var timeObserver: Timer?
     private let session: AudioSessionControlling
@@ -58,8 +79,11 @@ final class PlayerEngine: ObservableObject {
     /// конфигурации самого динамика (продолжаем).
     private var wasOnExternalOutput = false
 
-    init(session: AudioSessionControlling = SystemAudioSession()) {
+    init(session: AudioSessionControlling = SystemAudioSession(),
+         pauseModeStore: PauseModeStore = PauseModeStore()) {
         self.session = session
+        self.pauseModeStore = pauseModeStore
+        self.pauseMode = pauseModeStore.load()
         engine.attach(player)
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
         nowPlaying.wire(to: self)
@@ -168,11 +192,31 @@ final class PlayerEngine: ObservableObject {
         guard state == .playing else { return }
         player.pause()
         state = .paused
+        applyKeepAliveForCurrentPause()
         updateNowPlaying()
+    }
+
+    /// Приводит keep-alive в соответствие текущему режиму на паузе. В режиме
+    /// «всегда на связи» — запускает зацикленную тишину под форматом текущего
+    /// файла (движок не усыпляется, пульт жив); в «экономном» — гасит её.
+    /// Вне паузы keep-alive всегда выключен (его глушат resume/loadAndPlay/seek).
+    private func applyKeepAliveForCurrentPause() {
+        guard state == .paused else {
+            keepAlive.stop()
+            return
+        }
+        if pauseMode.needsKeepAliveOnPause, let format = file?.processingFormat {
+            keepAlive.start(format: format)
+        } else {
+            keepAlive.stop()
+        }
     }
 
     func resume() {
         guard state == .paused else { return }
+        // Выходим из паузы — глушим keep-alive до запуска основного player,
+        // чтобы тишина не звучала параллельно музыке.
+        keepAlive.stop()
         if needsGraphRebuild {
             // Появилось новое устройство вывода — собрать граф под его частоту.
             needsGraphRebuild = false
@@ -225,6 +269,10 @@ final class PlayerEngine: ObservableObject {
         generation &+= 1
         let gen = generation
 
+        // Seek/пересбор графа сбрасывает воспроизведение — keep-alive больше не
+        // нужен (если играли — заиграет музыка; если нет — applyKeepAlive ниже
+        // перезапустит тишину под новый формат на паузе).
+        keepAlive.stop()
         player.stop()
         prescheduledFile = nil
         sampleTimeBase = 0
@@ -249,6 +297,11 @@ final class PlayerEngine: ObservableObject {
             }
             player.play()
             state = .playing
+        }
+        // Остались на паузе после seek (или engine не стартовал) — в режиме
+        // «всегда на связи» вернуть keep-alive под (возможно новый) формат.
+        if state == .paused {
+            applyKeepAliveForCurrentPause()
         }
     }
 
@@ -286,6 +339,9 @@ final class PlayerEngine: ObservableObject {
         currentTime = 0
 
         // 2. Согласовать частоту сессии с файлом (bit-perfect, если ЦАП умеет).
+        // Новый трек заиграет — keep-alive больше не нужен (граф сейчас
+        // пересоберётся под формат файла, отдельную ноду тишины надо снять).
+        keepAlive.stop()
         player.stop()
         prescheduledFile = nil
         sampleTimeBase = 0
@@ -393,6 +449,7 @@ final class PlayerEngine: ObservableObject {
 
     private func stopPlayback() {
         generation &+= 1
+        keepAlive.stop()
         player.stop()
         engine.stop()
         file = nil
