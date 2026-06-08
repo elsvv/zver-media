@@ -76,10 +76,11 @@ struct ContentView: View {
             .tabItem { Label("Импорт", systemImage: "laptopcomputer.and.arrow.down") }
 
             NavigationStack {
-                SettingsView(account: account, store: library, backup: backup)
+                SettingsView(account: account, store: library, backup: backup,
+                             remote: remote, player: engine)
             }
             .safeAreaInset(edge: .bottom, spacing: 0) { miniPlayer }
-            .tabItem { Label("Облако", systemImage: "icloud") }
+            .tabItem { Label("Настройки", systemImage: "gearshape") }
         }
     }
 
