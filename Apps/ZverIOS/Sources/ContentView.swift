@@ -9,6 +9,8 @@ struct ContentView: View {
         return LibraryStore(catalogStore: CatalogStore(catalog: catalog),
                             playlistStore: PlaylistStore(catalog: catalog))
     }()
+    // Аккаунт облака (Яндекс.Диск): токен в Keychain, статус для Настроек (этап 4).
+    @StateObject private var account = CloudAccount()
 
     var body: some View {
         TabView {
@@ -35,6 +37,12 @@ struct ContentView: View {
             }
             .safeAreaInset(edge: .bottom, spacing: 0) { miniPlayer }
             .tabItem { Label("Импорт", systemImage: "laptopcomputer.and.arrow.down") }
+
+            NavigationStack {
+                SettingsView(account: account)
+            }
+            .safeAreaInset(edge: .bottom, spacing: 0) { miniPlayer }
+            .tabItem { Label("Облако", systemImage: "icloud") }
         }
     }
 
