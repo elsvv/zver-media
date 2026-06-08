@@ -38,4 +38,19 @@ public final class DiscoveredServiceRegistry: @unchecked Sendable {
         defer { lock.unlock() }
         return storage.values.sorted { $0.name < $1.name }
     }
+
+    /// Снимок сервисов с заданной ролью (`svc`), отсортированный по имени.
+    ///
+    /// Роль читается через computed `DiscoveredService.role`: отсутствие `svc`
+    /// трактуется как `ServiceTXT.sync`, поэтому `services(role: ServiceTXT.sync)`
+    /// включает и синк-сервисы этапа 3 (без TXT `svc`). Пульт-клиент Мака зовёт
+    /// `services(role: ServiceTXT.remote)`, чтобы не путать пульт iPhone с
+    /// синк-сервисом Мака на общем типе `_zver._tcp`.
+    public func services(role: String) -> [DiscoveredService] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage.values
+            .filter { $0.role == role }
+            .sorted { $0.name < $1.name }
+    }
 }
