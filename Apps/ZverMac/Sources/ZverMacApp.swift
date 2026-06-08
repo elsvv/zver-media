@@ -14,6 +14,10 @@ struct ZverMacApp: App {
     /// Координатор сетевой раздачи (сервер + Bonjour + pairing). Создаётся поверх
     /// той же очереди, что и UI: стартует сервер при непустой очереди.
     @StateObject private var server: ServerCoordinator
+    /// Координатор пульта (этап 5): browse `_zver._tcp svc=remote` → WS-клиент к
+    /// iPhone → приём состояния/библиотеки, отправка команд. Живёт всё время
+    /// работы приложения; browse реально стартует при открытии окна «Пульт».
+    @StateObject private var remote = RemoteClientCoordinator()
 
     init() {
         let queue = OutgoingQueue()
@@ -26,6 +30,11 @@ struct ZverMacApp: App {
             ImportWindow(queue: queue, dropController: dropController, server: server)
         }
         .defaultSize(width: 760, height: 560)
+
+        Window("Пульт", id: "remote") {
+            RemoteControlView(coordinator: remote)
+        }
+        .defaultSize(width: 440, height: 600)
 
         MenuBarExtra("Zver Media", systemImage: "music.note.house") {
             MenuBarContent(queue: queue, server: server)
@@ -191,6 +200,10 @@ private struct MenuBarContent: View {
             Text(message)
         }
         Divider()
+        Button("Открыть пульт") {
+            openWindow(id: "remote")
+            NSApp.activate(ignoringOtherApps: true)
+        }
         Button("Открыть окно синка") {
             openWindow(id: "main")
             NSApp.activate(ignoringOtherApps: true)
