@@ -3,6 +3,8 @@ import ZverCore
 
 struct ContentView: View {
     @StateObject private var engine = PlayerEngine()
+    // Автобэкап новых альбомов — тумблер из Настроек (тот же ключ @AppStorage).
+    @AppStorage(SettingsView.autoBackupKey) private var autoBackupNewAlbums = true
     // Аккаунт облака (Яндекс.Диск): токен в Keychain, статус для Настроек (этап 4).
     @StateObject private var account: CloudAccount
     // Каталог один: треки и плейлисты живут в одной БД (FK-связи). Сервис бэкапа
@@ -18,14 +20,19 @@ struct ContentView: View {
         let catalogStore = CatalogStore(catalog: catalog)
         let account = CloudAccount()
         _account = StateObject(wrappedValue: account)
-        _library = StateObject(wrappedValue: LibraryStore(
+        let library = LibraryStore(
             catalogStore: catalogStore,
             playlistStore: PlaylistStore(catalog: catalog)
-        ))
-        _backup = StateObject(wrappedValue: BackupService(
+        )
+        let backup = BackupService(
             catalogStore: catalogStore,
             tokenProvider: account.tokenProvider
-        ))
+        )
+        // Обёртки облака в UI идут через LibraryStore (UI не знает про BackupService
+        // напрямую). Связь — слабая (оба живут весь сеанс как @StateObject).
+        library.backupService = backup
+        _library = StateObject(wrappedValue: library)
+        _backup = StateObject(wrappedValue: backup)
     }
 
     var body: some View {
@@ -52,7 +59,7 @@ struct ContentView: View {
                 // автобэкап новых local-треков в облако (если залогинены).
                 MacImportView(rescan: {
                     await library.refresh()
-                    if account.isAuthorized {
+                    if account.isAuthorized, autoBackupNewAlbums {
                         await backup.backupAwaitingTracks()
                     }
                 })
@@ -61,7 +68,7 @@ struct ContentView: View {
             .tabItem { Label("Импорт", systemImage: "laptopcomputer.and.arrow.down") }
 
             NavigationStack {
-                SettingsView(account: account)
+                SettingsView(account: account, store: library, backup: backup)
             }
             .safeAreaInset(edge: .bottom, spacing: 0) { miniPlayer }
             .tabItem { Label("Облако", systemImage: "icloud") }

@@ -1,5 +1,6 @@
 import Combine
 import Foundation
+import GRDB
 import ZverCore
 import ZverStorage
 import ZverTransport
@@ -183,6 +184,69 @@ final class BackupService: ObservableObject {
         } catch {
             // Прочие сбои бэкапа каталога не критичны — каталог пересоберётся из ФС.
         }
+    }
+
+    // MARK: - Восстановление (для RestoreView в Настройках)
+
+    /// Восстанавливает библиотеку из облачного бэкапа каталога: качает
+    /// `catalog.sqlite.backup` во временный файл → открывает как ``Catalog`` →
+    /// читает все `TrackRecord` → `catalogStore.importRemoteCatalog(records:)`.
+    /// Импортированные записи (несут `cloudSha`) становятся `remote` — после
+    /// переустановки локальных файлов нет, вся библиотека показывается облачной;
+    /// существующие локальные строки НЕ деградируют (см. `importRemoteCatalog`).
+    ///
+    /// Возвращает число импортированных записей при успехе, `nil` — при ошибке
+    /// (нет авторизации/сети, бэкап не найден, файл повреждён). Сеть и парсинг
+    /// БД — на детаче (вне MainActor); запись в каталог — в `importRemoteCatalog`
+    /// (синхронный, тоже на детаче). UI после успеха зовёт `library.refresh()`.
+    @discardableResult
+    func restore() async -> Int? {
+        let store = self.store
+        let policy = self.policy
+        let catalogStore = self.catalogStore
+
+        let imported: Int? = await Task.detached(priority: .userInitiated) { () -> Int? in
+            // 1. Качаем бэкап каталога во временный файл (с ретраями по политике).
+            let tmpDir = FileManager.default.temporaryDirectory
+                .appendingPathComponent("zver-restore", isDirectory: true)
+            try? FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+            let backupFile = tmpDir.appendingPathComponent("catalog.sqlite.backup")
+            try? FileManager.default.removeItem(at: backupFile)
+
+            do {
+                _ = try await Self.runDownload(
+                    store: store, policy: policy,
+                    remotePath: CloudPaths.catalogBackupName, staging: backupFile
+                )
+            } catch {
+                try? FileManager.default.removeItem(at: backupFile)
+                return nil
+            }
+
+            // 2. Открываем скачанный файл как каталог и читаем все записи.
+            //    (Бэкап несёт ту же схему — миграции на открытии идемпотентны.)
+            let records: [TrackRecord]
+            do {
+                let backupCatalog = try Catalog(path: backupFile.path)
+                records = try await backupCatalog.dbQueue.read { db in
+                    try TrackRecord.order(Column("relativePath")).fetchAll(db)
+                }
+            } catch {
+                try? FileManager.default.removeItem(at: backupFile)
+                return nil
+            }
+            try? FileManager.default.removeItem(at: backupFile)
+
+            // 3. Импортируем в живой каталог: новые пути → remote, локальные не трогаем.
+            do {
+                try catalogStore.importRemoteCatalog(records: records)
+            } catch {
+                return nil
+            }
+            return records.count
+        }.value
+
+        return imported
     }
 
     // MARK: - Скачивание (для «Скачать» в UI)

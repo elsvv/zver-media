@@ -1,23 +1,35 @@
 import SwiftUI
+import ZverStorage
 
-/// Экран Настроек: вход в облако (Яндекс.Диск) ручным OAuth-токеном.
+/// Экран Настроек: вход в облако (Яндекс.Диск), переключатели бэкапа,
+/// ручной бэкап каталога и вход в восстановление.
 ///
 /// MVP-вход (см. план этапа 4): владелец вставляет ~годовой OAuth-токен (scope
 /// `cloud_api:disk.app_folder`), он ложится в Keychain (`CloudAccount`). Поле ввода
 /// маскированное (`SecureField`), статус показывает залогинен/нет и маскированный
 /// хвост токена. Полноценный браузерный вход — отложен (см. `CloudAccount`).
 ///
-/// Переключатели автобэкапа/каталога — ЗАГЛУШКИ на этом этапе: реальная связка с
-/// очередью и каталогом приедет в S4-10/S4-11. Здесь они лишь намечают будущий UI и
-/// не дёргают сеть.
+/// Раздел «Бэкап» доступен только авторизованным: тумблер автобэкапа новых альбомов
+/// (`@AppStorage` — ContentView читает его перед автобэкапом после импорта), кнопка
+/// ручного бэкапа каталога и переход в ``RestoreView``. Реальная связка — через
+/// ``LibraryStore``/``BackupService``; экран сети напрямую не дёргает.
 struct SettingsView: View {
     @ObservedObject var account: CloudAccount
+    @ObservedObject var store: LibraryStore
+    @ObservedObject var backup: BackupService
 
     @State private var tokenInput: String = ""
     @State private var errorMessage: String?
 
-    // Заглушки настроек бэкапа — провод в S4-10/S4-11.
-    @State private var autoBackupNewAlbums: Bool = true
+    /// Идёт ли ручной бэкап каталога (для индикатора на кнопке).
+    @State private var isBackingUpCatalog = false
+
+    /// Автобэкап новых альбомов: персистентный флаг. ContentView читает его (тот же
+    /// ключ) после импорта и решает, ставить ли треки в очередь автоматически.
+    @AppStorage(SettingsView.autoBackupKey) private var autoBackupNewAlbums = true
+
+    /// Ключ `@AppStorage` тумблера автобэкапа — общий с ContentView.
+    static let autoBackupKey = "cloud.autoBackupNewAlbums"
 
     var body: some View {
         Form {
@@ -83,17 +95,44 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: - Бэкап (заглушки до S4-10/S4-11)
+    // MARK: - Бэкап
 
     @ViewBuilder
     private var backupSection: some View {
         Section {
             Toggle("Автобэкап новых альбомов", isOn: $autoBackupNewAlbums)
-                .disabled(true)
+
+            Button {
+                Task { await backupAll() }
+            } label: {
+                HStack {
+                    Label("Сделать бэкап сейчас", systemImage: "icloud.and.arrow.up")
+                    Spacer()
+                    if backup.isBackingUp || isBackingUpCatalog {
+                        ProgressView()
+                    }
+                }
+            }
+            .disabled(backup.isBackingUp || isBackingUpCatalog)
+
+            NavigationLink {
+                RestoreView(store: store, account: account)
+            } label: {
+                Label("Восстановить из облака", systemImage: "arrow.clockwise.icloud")
+            }
         } header: {
             Text("Бэкап")
         } footer: {
-            Text("Автоматическая выгрузка и восстановление появятся в следующих обновлениях.")
+            Text("Новые альбомы выгружаются автоматически, если включено. «Сделать бэкап "
+                 + "сейчас» выгружает все неотправленные треки и каталог. Восстановление "
+                 + "возвращает библиотеку после переустановки.")
+        }
+
+        if let error = backup.lastError {
+            Section {
+                Label(message(for: error), systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+            }
         }
     }
 
@@ -123,6 +162,25 @@ struct SettingsView: View {
             errorMessage = nil
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+
+    private func backupAll() async {
+        guard !isBackingUpCatalog else { return }
+        isBackingUpCatalog = true
+        defer { isBackingUpCatalog = false }
+        await store.backupAll()
+    }
+
+    /// Человеко-читаемое сообщение для ошибки верхнего уровня облака.
+    private func message(for error: RemoteError) -> String {
+        switch error {
+        case .unauthorized:
+            return "Токен Яндекс.Диска недействителен — войдите заново."
+        case .insufficientStorage:
+            return "На Яндекс.Диске закончилось место."
+        default:
+            return "Ошибка облака. Повторите позже."
         }
     }
 }
