@@ -3,14 +3,30 @@ import ZverCore
 
 struct ContentView: View {
     @StateObject private var engine = PlayerEngine()
-    // Каталог один: треки и плейлисты живут в одной БД (FK-связи).
-    @StateObject private var library: LibraryStore = {
-        let catalog = LibraryStore.openCatalog()
-        return LibraryStore(catalogStore: CatalogStore(catalog: catalog),
-                            playlistStore: PlaylistStore(catalog: catalog))
-    }()
     // Аккаунт облака (Яндекс.Диск): токен в Keychain, статус для Настроек (этап 4).
-    @StateObject private var account = CloudAccount()
+    @StateObject private var account: CloudAccount
+    // Каталог один: треки и плейлисты живут в одной БД (FK-связи). Сервис бэкапа
+    // строится на том же CatalogStore — отсюда (а не из LibraryStore.openCatalog),
+    // чтобы CatalogStore был общим у библиотеки и бэкапа.
+    @StateObject private var library: LibraryStore
+    // Сервис облачного бэкапа (этап 4): очередь поверх YandexDiskStore, переходы
+    // fileState, авто-/ручная выгрузка и скачивание.
+    @StateObject private var backup: BackupService
+
+    init() {
+        let catalog = LibraryStore.openCatalog()
+        let catalogStore = CatalogStore(catalog: catalog)
+        let account = CloudAccount()
+        _account = StateObject(wrappedValue: account)
+        _library = StateObject(wrappedValue: LibraryStore(
+            catalogStore: catalogStore,
+            playlistStore: PlaylistStore(catalog: catalog)
+        ))
+        _backup = StateObject(wrappedValue: BackupService(
+            catalogStore: catalogStore,
+            tokenProvider: account.tokenProvider
+        ))
+    }
 
     var body: some View {
         TabView {
@@ -32,8 +48,14 @@ struct ContentView: View {
 
             NavigationStack {
                 // Рескан каталога после импорта альбома: reconcile подхватит
-                // правки из sidecar и добавит новые треки в библиотеку.
-                MacImportView(rescan: { await library.refresh() })
+                // правки из sidecar и добавит новые треки в библиотеку. Затем —
+                // автобэкап новых local-треков в облако (если залогинены).
+                MacImportView(rescan: {
+                    await library.refresh()
+                    if account.isAuthorized {
+                        await backup.backupAwaitingTracks()
+                    }
+                })
             }
             .safeAreaInset(edge: .bottom, spacing: 0) { miniPlayer }
             .tabItem { Label("Импорт", systemImage: "laptopcomputer.and.arrow.down") }
