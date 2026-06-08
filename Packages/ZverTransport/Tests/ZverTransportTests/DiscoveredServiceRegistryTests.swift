@@ -70,4 +70,65 @@ import Foundation
         #expect(a == b)
         #expect(a != c)
     }
+
+    // TXT входит в равенство (разные TXT → разные сервисы).
+    @Test func discoveredServiceEqualityIncludesTXT() {
+        let a = DiscoveredService(name: "iPhone", txt: ["svc": "remote"])
+        let b = DiscoveredService(name: "iPhone", txt: ["svc": "remote"])
+        let c = DiscoveredService(name: "iPhone", txt: ["svc": "sync"])
+        #expect(a == b)
+        #expect(a != c)
+    }
+
+    // TXT сохраняется при дедуп-обновлении записи (полный пересбор реестра в
+    // адаптере полагается на это).
+    @Test func addPreservesTXTOnUpdate() {
+        let registry = DiscoveredServiceRegistry()
+        registry.add(DiscoveredService(name: "iPhone", txt: ["svc": "remote", "v": "1"]))
+        registry.add(DiscoveredService(name: "iPhone", host: "10.0.0.7", port: 9000, txt: ["svc": "remote", "v": "1"]))
+        #expect(registry.services.count == 1)
+        let svc = registry.services.first
+        #expect(svc?.host == "10.0.0.7")
+        #expect(svc?.txt["svc"] == "remote")
+        #expect(svc?.role == ServiceTXT.remote)
+    }
+
+    // services(role:) отбирает только сервисы с заданной ролью.
+    @Test func servicesByRoleFiltersRemote() {
+        let registry = DiscoveredServiceRegistry()
+        registry.add(DiscoveredService(name: "iPhone", txt: ["svc": "remote"]))
+        registry.add(DiscoveredService(name: "Mac", txt: ["svc": "sync"]))
+        registry.add(DiscoveredService(name: "iPad", txt: ["svc": "remote"]))
+        let remotes = registry.services(role: ServiceTXT.remote)
+        #expect(remotes.map(\.name) == ["iPad", "iPhone"]) // отсортировано
+        #expect(remotes.allSatisfy { $0.role == ServiceTXT.remote })
+    }
+
+    // services(role: sync) ловит и явный svc=sync, и сервисы БЕЗ svc (этап 3).
+    @Test func servicesByRoleSyncIncludesLegacyWithoutSvc() {
+        let registry = DiscoveredServiceRegistry()
+        registry.add(DiscoveredService(name: "iPhone", txt: ["svc": "remote"]))
+        registry.add(DiscoveredService(name: "NewMac", txt: ["svc": "sync"]))
+        registry.add(DiscoveredService(name: "OldMac", txt: [:]))           // этап 3, без svc
+        registry.add(DiscoveredService(name: "LegacyMac"))                  // дефолтный init
+        let syncs = registry.services(role: ServiceTXT.sync)
+        #expect(syncs.map(\.name) == ["LegacyMac", "NewMac", "OldMac"])
+    }
+
+    // Результат фильтра отсортирован по имени, как и общий список.
+    @Test func servicesByRoleIsSortedByName() {
+        let registry = DiscoveredServiceRegistry()
+        registry.add(DiscoveredService(name: "Charlie", txt: ["svc": "remote"]))
+        registry.add(DiscoveredService(name: "Alpha", txt: ["svc": "remote"]))
+        registry.add(DiscoveredService(name: "Bravo", txt: ["svc": "remote"]))
+        #expect(registry.services(role: ServiceTXT.remote).map(\.name) == ["Alpha", "Bravo", "Charlie"])
+    }
+
+    // Пустой txt у старых сервисов не ломает реестр и общий список services.
+    @Test func legacyServicesWithoutTXTStillListed() {
+        let registry = DiscoveredServiceRegistry()
+        registry.add(DiscoveredService(name: "MacBook", host: "1.2.3.4", port: 8080))
+        #expect(registry.services.count == 1)
+        #expect(registry.services.first?.txt.isEmpty == true)
+    }
 }
