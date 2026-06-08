@@ -49,6 +49,23 @@ final class BackupService: ObservableObject {
     /// `done`). Заполняется при постановке в очередь, читается в обработчике события.
     private var expectedShas: [String: String] = [:]
 
+    /// Хэндлы фоновых задач, дописывающих `fileState`/`cloudSha` в каталог из событий
+    /// очереди (детач-записи в БД). `backupAwaitingTracks` дожидается ИХ ЗАВЕРШЕНИЯ перед
+    /// `backupCatalog()`, иначе залитый `catalog.sqlite.backup` может зафиксировать треки
+    /// ещё в `local`/`cloudSha == nil`, хотя они уже подтверждены в облаке (гонка
+    /// «бэкап каталога vs запись fileState»). Накапливается на MainActor — гонок нет.
+    private var pendingCatalogWrites: [Task<Void, Never>] = []
+
+    /// Сборщик хэндлов MainActor-задач, обрабатывающих события очереди (`onEvent` →
+    /// `handle`). `onEvent` — `@Sendable` (вызывается с задачи актора очереди, НЕ на
+    /// MainActor), поэтому регистрировать хэндлы в `@MainActor`-массив напрямую нельзя —
+    /// используем потокобезопасный бокс. Ключевое: `onEvent` вызывается СИНХРОННО из
+    /// `BackupQueue` во время `run()`, значит к возврату из `run()` каждый обработчик
+    /// уже СОЗДАН и зарегистрирован здесь. `backupAwaitingTracks` дренирует их ПОСЛЕ
+    /// `run()` — только тогда `handle` успеет поставить детач-записи в каталог, которые
+    /// затем тоже ожидаются.
+    private let eventHandlers = EventHandlerCollector()
+
     /// - Parameters:
     ///   - catalogStore: каталог (источник правды о `fileState`/`cloudSha`).
     ///   - documentsURL: корень Documents (база для `relativePath` ↔ локальный URL).
@@ -136,7 +153,15 @@ final class BackupService: ObservableObject {
         }
         await queue.run()
 
-        // После батча выгрузок — бэкап каталога (перезапись).
+        // Гонка «бэкап каталога vs запись fileState»: `run()` НЕ дожидается ни
+        // MainActor-обработчиков событий (`Task { @MainActor in handle(...) }`), ни
+        // детач-записей в БД (`Task.detached { markBackedUp(...) }`). Перед заливкой
+        // каталога детерминированно дренируем оба слоя — иначе `catalog.sqlite.backup`
+        // зафиксирует часть треков ещё в `local`/`cloudSha == nil`, и восстановление
+        // (`importRemoteCatalog`) импортирует их с неверным `fileState`.
+        await drainCatalogWrites()
+
+        // После батча выгрузок И слива каталожных записей — бэкап каталога (перезапись).
         await backupCatalog()
     }
 
@@ -311,11 +336,16 @@ final class BackupService: ObservableObject {
             store: store,
             policy: policy,
             maxConcurrent: 2,
-            onEvent: { [weak self] itemId, state in
-                // Колбэк не на MainActor — переходим явно.
-                Task { @MainActor [weak self] in
+            onEvent: { [weak self, eventHandlers] itemId, state in
+                // Колбэк не на MainActor — переходим явно. Хэндл задачи регистрируем
+                // СИНХРОННО в потокобезопасный бокс, чтобы `backupAwaitingTracks` мог
+                // дождаться обработки события (и постановки детач-записи в каталог) перед
+                // бэкапом `catalog.sqlite`. Регистрация синхронна → к возврату из `run()`
+                // все обработчики уже учтены.
+                let handler = Task<Void, Never> { @MainActor [weak self] in
                     self?.handle(itemId: itemId, state: state)
                 }
+                eventHandlers.add(handler)
             }
         )
     }
@@ -367,19 +397,46 @@ final class BackupService: ObservableObject {
 
     /// Идемпотентно обновляет `fileState` (и опц. `cloudSha`) строки каталога.
     /// Запись БД — на детаче (синхронный `CatalogStore` бросает; ошибку глотаем —
-    /// рассинхрон самозалечится при следующем рескане/бэкапе).
+    /// рассинхрон самозалечится при следующем рескане/бэкапе). Хэндл задачи
+    /// регистрируется в `pendingCatalogWrites`, чтобы автобэкап мог дождаться записи
+    /// перед заливкой `catalog.sqlite`.
     private func setState(_ relativePath: String, _ state: FileState, cloudSha: String? = nil) {
         let catalogStore = self.catalogStore
-        Task.detached(priority: .utility) {
+        let write = Task<Void, Never>.detached(priority: .utility) {
             try? catalogStore.setFileState(relativePath: relativePath, state, cloudSha: cloudSha)
         }
+        pendingCatalogWrites.append(write)
     }
 
-    /// Помечает трек подтверждённым в облаке (после сверки sha).
+    /// Помечает трек подтверждённым в облаке (после сверки sha). Хэндл детач-записи
+    /// регистрируется в `pendingCatalogWrites` (см. `setState`).
     private func markBackedUp(_ relativePath: String, cloudSha: String) {
         let catalogStore = self.catalogStore
-        Task.detached(priority: .utility) {
+        let write = Task<Void, Never>.detached(priority: .utility) {
             try? catalogStore.markBackedUp(relativePath: relativePath, cloudSha: cloudSha)
+        }
+        pendingCatalogWrites.append(write)
+    }
+
+    /// Детерминированно дожидается завершения всех каталожных записей, инициированных
+    /// событиями текущего батча выгрузок, ПЕРЕД бэкапом `catalog.sqlite`.
+    ///
+    /// Два слоя fire-and-forget между `queue.run()` и записью в БД: (1) MainActor-задачи
+    /// `onEvent → handle`; (2) детач-записи `setState`/`markBackedUp`. `run()` не ждёт ни
+    /// одного. Сначала дренируем обработчики событий (только тогда `handle` успеет
+    /// поставить детач-записи в `pendingCatalogWrites`), затем — сами записи. Цикл —
+    /// потому что обработчики событий, отработав, могут добавить новые записи.
+    private func drainCatalogWrites() async {
+        // Слой 1: дожидаемся всех MainActor-обработчиков событий очереди. Цикл — потому
+        // что обработчик, отработав, мог поставить новые (теоретически нет, но дёшево).
+        while case let handlers = eventHandlers.drain(), !handlers.isEmpty {
+            for handler in handlers { await handler.value }
+        }
+        // Слой 2: дожидаемся всех детач-записей в каталог, поставленных обработчиками.
+        while !pendingCatalogWrites.isEmpty {
+            let writes = pendingCatalogWrites
+            pendingCatalogWrites.removeAll()
+            for write in writes { await write.value }
         }
     }
 
@@ -461,5 +518,31 @@ final class BackupService: ObservableObject {
                 throw error
             }
         }
+    }
+}
+
+/// Потокобезопасный сборщик хэндлов MainActor-задач-обработчиков событий очереди.
+///
+/// Нужен, потому что `BackupQueue.onEvent` — `@Sendable` и вызывается НЕ на MainActor
+/// (с задач актора очереди), а `BackupService` — `@MainActor`. Класс под обычным
+/// `NSLock` даёт синхронную регистрацию из любого контекста и атомарный `drain()` с
+/// MainActor перед бэкапом каталога. `@unchecked Sendable`: вся мутируемая
+/// инвариантность защищена замком.
+private final class EventHandlerCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var handlers: [Task<Void, Never>] = []
+
+    /// Регистрирует хэндл обработчика (вызывается синхронно из `@Sendable onEvent`).
+    func add(_ handler: Task<Void, Never>) {
+        lock.lock()
+        handlers.append(handler)
+        lock.unlock()
+    }
+
+    /// Атомарно забирает и очищает накопленные хэндлы (вызывается с MainActor в дренаже).
+    func drain() -> [Task<Void, Never>] {
+        lock.lock()
+        defer { handlers.removeAll(); lock.unlock() }
+        return handlers
     }
 }
