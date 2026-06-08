@@ -60,6 +60,14 @@ final class RemoteClientCoordinator: ObservableObject {
 
     /// iPhone, с которым сейчас установлена/устанавливается сессия.
     private var connectingDeviceName: String?
+    /// Монотонный id активной попытки соединения. Каждый `connect`/`goOffline`/
+    /// `stop` инкрементит его; колбэки клиента захватывают своё поколение, и
+    /// обработчик отбрасывает хвосты устаревшей/заменённой сессии. Защита от
+    /// гонки re-connect к ТОМУ ЖЕ iPhone: `NWWebSocketClient.connect()` первым
+    /// делом синхронно `disconnect()`-ит старую сессию, та шлёт `.disconnected`;
+    /// проверки только по имени недостаточно (имя совпадает) — устаревший
+    /// `.disconnected` порвал бы свежесозданную сессию через `goOffline()`.
+    private var sessionGeneration = 0
     /// Авторизация прошла (`helloAck{ok:true}`) — команды разрешены.
     private var isAuthorized = false
 
@@ -97,6 +105,7 @@ final class RemoteClientCoordinator: ObservableObject {
 
     /// Полностью останавливает пульт: browse, соединение, статус → idle.
     func stop() {
+        sessionGeneration += 1
         browser.stop()
         client.disconnect()
         connectingDeviceName = nil
@@ -145,6 +154,8 @@ final class RemoteClientCoordinator: ObservableObject {
     /// `@Sendable` на сетевой очереди → прыгаем на `@MainActor`.
     private func connect(to device: DiscoveredService) {
         let name = device.name
+        sessionGeneration += 1
+        let generation = sessionGeneration
         connectingDeviceName = name
         selectedDeviceName = name
         isAuthorized = false
@@ -155,12 +166,12 @@ final class RemoteClientCoordinator: ObservableObject {
             to: device,
             onMessage: { @Sendable [weak self] message in
                 Task { @MainActor [weak self] in
-                    self?.handleIncoming(message, fromDevice: name)
+                    self?.handleIncoming(message, fromDevice: name, generation: generation)
                 }
             },
             onState: { @Sendable [weak self] connectionState in
                 Task { @MainActor [weak self] in
-                    self?.handleConnectionState(connectionState, device: device)
+                    self?.handleConnectionState(connectionState, device: device, generation: generation)
                 }
             }
         )
@@ -168,9 +179,13 @@ final class RemoteClientCoordinator: ObservableObject {
 
     /// Реакция на смену состояния WebSocket-соединения.
     private func handleConnectionState(_ connectionState: WebSocketConnectionState,
-                                       device: DiscoveredService) {
-        // Игнорируем хвосты от уже отменённой/устаревшей сессии.
-        guard connectingDeviceName == device.name else { return }
+                                       device: DiscoveredService,
+                                       generation: Int) {
+        // Игнорируем хвосты от уже отменённой/устаревшей/заменённой сессии
+        // (см. `sessionGeneration`): только поколение точно отделяет колбэки
+        // текущей попытки от синхронного `.disconnected` предыдущей сессии того
+        // же iPhone при re-connect.
+        guard generation == sessionGeneration else { return }
 
         switch connectionState {
         case .connecting:
@@ -202,8 +217,8 @@ final class RemoteClientCoordinator: ObservableObject {
 
     /// Разбор входящего `RemoteMessage`. Авторизация (`paired`/`helloAck`) —
     /// здесь; пуши состояния/библиотеки делегируются `store`.
-    private func handleIncoming(_ message: RemoteMessage, fromDevice name: String) {
-        guard connectingDeviceName == name else { return }
+    private func handleIncoming(_ message: RemoteMessage, fromDevice name: String, generation: Int) {
+        guard generation == sessionGeneration else { return }
 
         switch message.payload {
         case let .paired(token):
@@ -244,6 +259,7 @@ final class RemoteClientCoordinator: ObservableObject {
     /// авторизацию, чистит агрегированное состояние. browse продолжает работать —
     /// при возврате iPhone `handleDiscovered` переподключится.
     private func goOffline() {
+        sessionGeneration += 1
         client.disconnect()
         connectingDeviceName = nil
         isAuthorized = false
