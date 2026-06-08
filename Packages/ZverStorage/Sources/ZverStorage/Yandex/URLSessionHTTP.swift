@@ -87,11 +87,29 @@ public final class URLSessionHTTPClient: HTTPClient, @unchecked Sendable {
         }
 
         let fm = FileManager.default
-        // 206 (Partial Content) → сервер отдал ХВОСТ от запрошенного Range:
-        // дописываем его в конец уже лежащего префикса. Иначе (200/новый файл) —
-        // материализуем целиком с нуля.
-        let append = http.statusCode == 206 && fm.fileExists(atPath: destination.path)
-        if append {
+        // Тело ответа уже материализовано в `tempURL` системой. По завершении —
+        // в любом исходе — `tempURL` нам больше не нужен.
+        defer { try? fm.removeItem(at: tempURL) }
+
+        // КРИТИЧНО: решаем судьбу `destination` ПО СТАТУСУ, до любой мутации.
+        // `session.download(for:)` НЕ бросает на не-2xx — на ошибке в `tempURL`
+        // лежит маленькое тело ошибки (JSON/HTML). Записать его в `destination`
+        // (особенно затерев существующий валидный частичный префикс) — значит
+        // навсегда повредить докачку: `ensureSuccess` в `YandexDiskStore.download`
+        // бросит ретраябельную ошибку, очередь повторит, но смещение Range уже
+        // отсчитается от мусора. Поэтому на не-206/200 НЕ трогаем `destination` и
+        // НЕ зовём `progress` — частичный префикс остаётся нетронутым, докачка
+        // переживает транзиентный сбой.
+        switch Self.downloadDisposition(statusCode: http.statusCode,
+                                         destinationExists: fm.fileExists(atPath: destination.path)) {
+        case .leaveUntouched:
+            // Не-успех (или 206 без существующего префикса — нечего дописывать):
+            // не пишем ничего, отдаём ответ — статус разберёт вызывающий.
+            return http
+
+        case .append:
+            // 206 (Partial Content) → сервер отдал ХВОСТ от запрошенного Range:
+            // дописываем его в конец уже лежащего префикса.
             let tailHandle = try FileHandle(forReadingFrom: tempURL)
             defer { try? tailHandle.close() }
             let outHandle = try FileHandle(forWritingTo: destination)
@@ -102,15 +120,46 @@ public final class URLSessionHTTPClient: HTTPClient, @unchecked Sendable {
                 if chunk.isEmpty { break }
                 try outHandle.write(contentsOf: chunk)
             }
-        } else {
+
+        case .overwrite:
+            // 200 (или новый файл) — материализуем тело целиком с нуля.
             if fm.fileExists(atPath: destination.path) {
                 try? fm.removeItem(at: destination)
             }
-            try fm.moveItem(at: tempURL, to: destination)
+            try fm.copyItem(at: tempURL, to: destination)
         }
 
         let finalSize = (try? fm.attributesOfItem(atPath: destination.path)[.size] as? NSNumber)??.int64Value ?? 0
         progress(finalSize)
         return http
+    }
+
+    /// Что сделать с файлом-приёмником по HTTP-статусу скачивания (чистое решение,
+    /// вынесено для TDD без сети).
+    enum DownloadDisposition: Equatable {
+        /// Дописать тело в конец существующего префикса (успешная докачка, 206).
+        case append
+        /// Перезаписать приёмник телом целиком (полный ответ, 200 / новый файл).
+        case overwrite
+        /// Не трогать приёмник вовсе (любой не-успех, либо 206 без префикса).
+        case leaveUntouched
+    }
+
+    /// Чистое правило диспозиции приёмника: статус решает append/overwrite/leave.
+    ///
+    /// - 206 при существующем префиксе → `append` (дописать хвост Range).
+    /// - 200 → `overwrite` (полное тело с нуля).
+    /// - всё прочее (не-2xx, либо 206 без префикса) → `leaveUntouched`: на ошибке
+    ///   в temp лежит тело ошибки, и трогать им валидный частичный префикс
+    ///   НЕЛЬЗЯ — иначе докачка повреждается безвозвратно (см. `download`).
+    static func downloadDisposition(statusCode: Int, destinationExists: Bool) -> DownloadDisposition {
+        switch statusCode {
+        case 206:
+            return destinationExists ? .append : .overwrite
+        case 200:
+            return .overwrite
+        default:
+            return .leaveUntouched
+        }
     }
 }
