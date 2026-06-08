@@ -2,7 +2,7 @@ import SwiftUI
 import ZverCore
 
 struct ContentView: View {
-    @StateObject private var engine = PlayerEngine()
+    @StateObject private var engine: PlayerEngine
     // Автобэкап новых альбомов — тумблер из Настроек (тот же ключ @AppStorage).
     @AppStorage(SettingsView.autoBackupKey) private var autoBackupNewAlbums = true
     // Аккаунт облака (Яндекс.Диск): токен в Keychain, статус для Настроек (этап 4).
@@ -14,6 +14,9 @@ struct ContentView: View {
     // Сервис облачного бэкапа (этап 4): очередь поверх YandexDiskStore, переходы
     // fileState, авто-/ручная выгрузка и скачивание.
     @StateObject private var backup: BackupService
+    // Пульт с Мака (этап 5): WS-сервер + pairing-хост + приём команд. Строится на
+    // тех же engine/library; UI (тумблер/код/режим паузы) добавит S5-6.
+    @StateObject private var remote: RemoteControlService
 
     init() {
         let catalog = LibraryStore.openCatalog()
@@ -33,6 +36,11 @@ struct ContentView: View {
         library.backupService = backup
         _library = StateObject(wrappedValue: library)
         _backup = StateObject(wrappedValue: backup)
+        // Пульт держит слабые ссылки на engine/library — оба живут весь сеанс как
+        // @StateObject. Сервер не запускается, пока пользователь не включит тумблер.
+        let engine = PlayerEngine()
+        _engine = StateObject(wrappedValue: engine)
+        _remote = StateObject(wrappedValue: RemoteControlService(player: engine, library: library))
     }
 
     var body: some View {
