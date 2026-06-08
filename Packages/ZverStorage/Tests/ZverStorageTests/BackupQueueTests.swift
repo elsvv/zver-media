@@ -344,6 +344,45 @@ import ZverTransport
         }
     }
 
+    @Test func downloadResumesAfterTransientMidStreamFailure() async throws {
+        // Источник в облаке.
+        let store0 = InMemoryRemoteStore()
+        let content = Data("0123456789ABCDEFGHIJKLMNOPQRSTUV".utf8) // 32 байта
+        let src = try tempFile(content)
+        defer { try? FileManager.default.removeItem(at: src) }
+        _ = try await store0.upload(localFile: src, to: "p") { _ in }
+
+        // Декоратор: на 1-й попытке download дозапишет 5 байт хвоста и упадёт server(503),
+        // на 2-й — реально докачает остаток.
+        let store = PartialDownloadThenFailStore(inner: store0, partialTailBytes: 5)
+
+        // Локальный приёмник: первые 8 байт уже скачаны ранее.
+        let dst = FileManager.default.temporaryDirectory
+            .appendingPathComponent("zver-qdl-\(UUID().uuidString).bin")
+        defer { try? FileManager.default.removeItem(at: dst) }
+        try content.prefix(8).write(to: dst)
+
+        let log = EventLog()
+        let queue = BackupQueue(store: store, policy: RetryPolicy(), sleeper: FakeSleeper(), maxConcurrent: 1) {
+            id, state in log.record(id, state)
+        }
+        // resumeFrom фиксируется при enqueue = 8. После частичной записи на падающей попытке
+        // файл вырастет до 13 байт. Если очередь повторно подаст resumeFrom=8 — inner снова
+        // допишет хвост от 8 → файл перевалит за 32 байта и не сойдётся по sha. Корректно:
+        // очередь пересчитывает offset от фактического размера (13) → дописывается ровно остаток.
+        let target = DownloadTarget(remotePath: "p", localFile: dst, resumeFrom: 8)
+        await queue.enqueueDownload(id: "dr", target: target, expectedSha: Sha256.hash(content))
+        await queue.run()
+
+        let readBack = try Data(contentsOf: dst)
+        #expect(readBack == content)
+        #expect(readBack.count == content.count)
+        guard case .done = log.states(for: "dr").last else {
+            Issue.record("ожидался .done после докачки с пересчётом смещения, получено \(String(describing: log.states(for: "dr").last))")
+            return
+        }
+    }
+
     @Test func downloadShaMismatchFails() async throws {
         let store = InMemoryRemoteStore()
         let content = Data("payload".utf8)
