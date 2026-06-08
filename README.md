@@ -5,7 +5,8 @@
 метадата, пульт) + Яндекс.Диск как холодный ярус хранения.
 
 Готовы **этап 1 «Ядро плеера»**, **этап 2 «Каталог и библиотека»**,
-**этап 3 «Синк с Мака»** и **этап 4 «Яндекс.Диск»**. Следующий — этап 5 «Пульт».
+**этап 3 «Синк с Мака»**, **этап 4 «Яндекс.Диск»** и **этап 5 «Пульт с Мака»** —
+все пять этапов MVP.
 
 Документы:
 - [Дизайн системы](docs/plans/2026-06-06-zver-cloud-design.md)
@@ -13,6 +14,7 @@
 - [План этапа 2](docs/plans/2026-06-07-stage2-catalog-library.md)
 - [План этапа 3](docs/plans/2026-06-07-stage3-mac-sync.md)
 - [План этапа 4](docs/plans/2026-06-08-stage4-yandex.md)
+- [План этапа 5](docs/plans/2026-06-08-stage5-remote.md)
 
 ## Что умеет
 
@@ -124,18 +126,83 @@ OAuth-URL) живёт в `Packages/ZverStorage` и покрыта юнит-те�
 рантайм-объект `YandexDiskStore` (`URLSession`) — тонкий адаптер, проверяется
 компиляцией, сеть проверяет владелец на устройстве.
 
+## Пульт с Мака (этап 5)
+
+Управление плеером iPhone с Мака по локальной сети, с задержками в миллисекунды.
+Пока на телефоне жив background audio, сокеты открыты — Мак гоняет команды и
+видит состояние воспроизведения в реальном времени.
+
+- **Роли сети перевёрнуты относительно синка (этап 3).** Здесь **iPhone —
+  WebSocket-СЕРВЕР** и хост pairing: он анонсит тот же Bonjour-тип `_zver._tcp`,
+  но с TXT-полем `svc=remote`, и поднимает `NWListener` с
+  `NWProtocolWebSocket`. **Mac — WebSocket-клиент** (`NWConnection`): браузит
+  `_zver._tcp`, фильтрует по роли (`svc=remote`, чтобы не спутать пульт iPhone
+  со своим же синк-сервисом без `svc`), подключается и открывает окно «Пульт».
+- **Версионируемый протокол пульта** (`RemoteMessage`, `protocolVersion = 1`,
+  как `SyncManifest`). Конверт несёт `RemotePayload` (тег `type`). Mac → iPhone:
+  команды транспорта `play`/`pause`/`togglePlayPause`/`next`/`previous`/`seek` и
+  запросы библиотеки `requestLibrary`/`requestAlbumTracks`/`playAlbum`. iPhone →
+  Mac: пуш `state` (`RemotePlayerState`: playback, текущий трек, позиция,
+  очередь, индекс) при изменении, `library`/`albumTracks` для браузинга,
+  `paired`/`helloAck`/`error` для авторизации. DTO протокола
+  (`RemoteTrack`/`RemoteAlbum`/`RemoteLibrary`) не зависят от `ZverCore.Track`
+  (как `ManifestTrack` синка). Декод forward-совместим: неизвестный `type` или
+  чужая версия не роняют соединение.
+- **Pairing с перевёрнутыми ролями.** Поверх WebSocket, до приёма команд: новый
+  Mac шлёт `pair{code}` (6-значный код показан на iPhone) → iPhone сверяет
+  (`Pairing.verify`, константное время) → `paired{token}`, Mac кладёт токен в
+  Keychain. Дальше при каждом подключении Mac первым сообщением шлёт
+  `hello{token}` → iPhone сверяет с выпущенным токеном → `helloAck`, и только
+  потом принимает команды и шлёт состояние. Переиспользованы `Pairing` и
+  `KeychainKeyStore` этапа 3; теперь **токен выпускает iPhone** (сервис-ключ
+  `zver-remote`). Один доверенный Mac в MVP.
+- **Два режима паузы** (настройка на iPhone):
+  - **«Всегда на связи»** (`alwaysConnected`): на паузе основной плеер встаёт
+    (позиция сохраняется), но движок крутит отдельную keep-alive-ноду
+    (`AVAudioPlayerNode` с зацикленной тишиной нулевыми сэмплами). iOS не
+    усыпляет приложение — аудиосессия активна, ЦАП захвачен — и WebSocket-сервер
+    пульта продолжает мгновенно принимать команды с Мака даже на паузе.
+  - **«Экономный»** (`economical`, дефолт): поведение этапов 1–4 без изменений —
+    на паузе движок останавливается, приложение со временем суспендится, пульт
+    слепнет; команды снова доходят при оживлении с локскрина/Control Center.
+  - Keep-alive живёт на **отдельной** ноде, не на основном `player`, чтобы не
+    задеть gapless-бухгалтерию, `currentTime` и предпланирование следующего
+    трека. `MPRemoteCommandCenter`/локскрин этапа 1 продолжают работать:
+    системные команды и команды пульта оба идут в `PlayerEngine` и сосуществуют.
+- **Браузинг библиотеки и запуск альбома.** Чтобы не слать всю библиотеку зараз,
+  на коннект iPhone отдаёт лёгкий список альбомов (`RemoteLibrary` — id/title/
+  artist/year/trackCount); Mac по тапу тянет треки альбома
+  (`requestAlbumTracks` → `albumTracks`) и запускает `playAlbum(albumId,
+  startIndex)`. iPhone резолвит альбом из своего каталога (`AlbumGroup`) и зовёт
+  `PlayerEngine.play(tracks:startAt:)`. Mac никогда не получает локальные
+  URL/файлы. Окно «Пульт» на Маке показывает текущий трек, транспорт, слайдер
+  позиции (интерполируется между пушами), очередь и список альбомов; при потере
+  iPhone из сети — деградация «iPhone не в сети» с переподключением при возврате.
+
+Чистая логика пульта (версионируемый конверт и кодек протокола, диф состояния с
+троттлингом позиции, фильтр Bonjour-роли по `svc`, проверка hello-токена) живёт
+в `Packages/ZverTransport/.../Remote` и покрыта юнит-тестами; рантайм-сетевые
+объекты (`NWWebSocketServer` на `NWListener`, `NWWebSocketClient` на
+`NWConnection`) и аудио keep-alive — тонкие адаптеры в приложениях, проверяются
+компиляцией, реальное управление проверяет владелец на железе (iPhone + Mac в
+одной сети).
+
 ## Структура
 
 ```
 Packages/ZverCore/      — SPM: модели, очередь воспроизведения, координатор частоты
 Packages/ZverMetadata/  — SPM: парсинг тегов (Vorbis-комменты), сканер папки, sidecar-overlay
 Packages/ZverTransport/ — SPM: чистая логика синка (манифест, SHA-256, pairing,
-                          Bonjour-реестр, дельта-планировщик, разбор HTTP)
+                          Bonjour-реестр + роль svc, дельта-планировщик, разбор HTTP);
+                          .../Remote — протокол пульта (RemoteMessage/кодек, диф
+                          состояния) + WebSocket-адаптеры (NWWebSocketServer/Client)
 Packages/ZverStorage/   — SPM: чистая логика облака (протокол RemoteStore + модели,
                           Yandex wire — запросы/ответы/ошибки, RetryPolicy + backoff,
                           BackupQueue, OAuth-URL; YandexDiskStore — URLSession-адаптер)
-Apps/ZverIOS/           — iOS-приложение (XcodeGen, проект генерируется из project.yml)
-Apps/ZverMac/           — Mac-компаньон ZverMac (меню-бар, drag-drop, HTTP-раздача)
+Apps/ZverIOS/           — iOS-приложение (XcodeGen, проект генерируется из project.yml);
+                          Sources/Remote — WS-сервер пульта, pairing-хост, библиотека-билдер
+Apps/ZverMac/           — Mac-компаньон ZverMac (меню-бар, drag-drop, HTTP-раздача);
+                          Sources/Remote — WS-клиент пульта, окно «Пульт», браузинг библиотеки
 docs/plans/             — дизайн и implementation-планы
 scripts/                — вспомогательные скрипты
 ```
