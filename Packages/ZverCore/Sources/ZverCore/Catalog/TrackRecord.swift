@@ -17,11 +17,19 @@ public struct TrackRecord: Codable, Equatable, Sendable,
     public var bitDepth: Int?
     public var artworkFilePath: String?
     public var addedAt: Date
+    /// Ярус хранения (этап 4). rawValue `FileState`; новые/импортированные
+    /// треки — `local`. Колонка NOT NULL DEFAULT 'local'.
+    public var fileState: String
+    /// SHA-256, подтверждённый в облаке (метаданные ресурса). nil, пока трек
+    /// не подтверждён в облаке. Гейт удаления локальной копии при offload.
+    public var cloudSha: String?
 
     public init(relativePath: String, title: String, artist: String? = nil,
                 album: String? = nil, trackNumber: Int? = nil, year: Int? = nil,
                 duration: Double, sampleRate: Double, bitDepth: Int? = nil,
-                artworkFilePath: String? = nil, addedAt: Date = Date()) {
+                artworkFilePath: String? = nil, addedAt: Date = Date(),
+                fileState: String = FileState.local.rawValue,
+                cloudSha: String? = nil) {
         self.relativePath = relativePath
         self.title = title
         self.artist = artist
@@ -33,6 +41,8 @@ public struct TrackRecord: Codable, Equatable, Sendable,
         self.bitDepth = bitDepth
         self.artworkFilePath = artworkFilePath
         self.addedAt = addedAt
+        self.fileState = fileState
+        self.cloudSha = cloudSha
     }
 
     /// Запись из доменного трека: метаданные берутся из `track`,
@@ -49,7 +59,8 @@ public struct TrackRecord: Codable, Equatable, Sendable,
                   sampleRate: track.sampleRate,
                   bitDepth: track.bitDepth,
                   artworkFilePath: artworkFilePath,
-                  addedAt: addedAt)
+                  addedAt: addedAt,
+                  fileState: track.fileState.rawValue)
     }
 
     /// Доменный трек: относительные пути разворачиваются от Documents.
@@ -63,6 +74,7 @@ public struct TrackRecord: Codable, Equatable, Sendable,
               duration: duration,
               sampleRate: sampleRate,
               bitDepth: bitDepth,
-              artworkFileURL: artworkFilePath.map { documentsURL.appendingPathComponent($0) })
+              artworkFileURL: artworkFilePath.map { documentsURL.appendingPathComponent($0) },
+              fileState: FileState(rawValue: fileState) ?? .local)
     }
 }
