@@ -10,8 +10,9 @@ import ZverTransport
 ///
 /// `@MainActor ObservableObject` — публикует наблюдаемое состояние для UI (идёт ли
 /// бэкап, какие треки в ошибке). Вся сеть — за инъецированным ``RemoteStore`` (боевой
-/// дефолт — ``YandexDiskStore`` поверх ФОНОВОЙ `URLSession`, переживающей сворачивание
-/// приложения). Ретраи/backoff/параллелизм живут в ``BackupQueue`` (S4-4); сервис лишь
+/// дефолт — ``YandexDiskStore`` поверх `URLSession` с `.default`-конфигом: async-API
+/// `data/upload/download` работает в активном приложении; полноценная фоновая доставка
+/// через делегат — бэклог). Ретраи/backoff/параллелизм живут в ``BackupQueue`` (S4-4); сервис лишь
 /// строит `BackupItem`, мапит события очереди в каталожный `fileState` и сверяет sha.
 ///
 /// **Поток автобэкапа.** После импорта/рескана: `catalogStore.tracksAwaitingBackup()`
@@ -57,6 +58,15 @@ final class BackupService: ObservableObject {
     /// «бэкап каталога vs запись fileState»). Накапливается на MainActor — гонок нет.
     private var pendingCatalogWrites: [Task<Void, Never>] = []
 
+    /// Хвост СЕРИАЛИЗОВАННОЙ цепочки каталожных записей: каждая новая запись ждёт
+    /// завершения предыдущей, поэтому порядок коммита в БД = порядок вызова (события
+    /// очереди обрабатываются на MainActor по порядку). Без этого два независимых
+    /// `Task.detached` одного трека (например `uploading`, затем `backedUp`) могли лечь
+    /// в serial `dbQueue.write` в обратном порядке и оставить трек НАВСЕГДА в `uploading`
+    /// (`fileState` под `noOverwrite` в reconcile, `tracksAwaitingBackup` его не берёт —
+    /// рассинхрон НЕ самозалечивается).
+    private var catalogWriteTail: Task<Void, Never> = Task {}
+
     /// Сборщик хэндлов MainActor-задач, обрабатывающих события очереди (`onEvent` →
     /// `handle`). `onEvent` — `@Sendable` (вызывается с задачи актора очереди, НЕ на
     /// MainActor), поэтому регистрировать хэндлы в `@MainActor`-массив напрямую нельзя —
@@ -73,7 +83,7 @@ final class BackupService: ObservableObject {
     ///   - catalogFileURL: путь к `catalog.sqlite` (для бэкапа каталога в облако).
     ///   - tokenProvider: поставщик OAuth-токена (из `CloudAccount`).
     ///   - store: облачное хранилище за протоколом. Боевой дефолт — `YandexDiskStore`
-    ///     поверх фоновой URLSession; в превью/тестах подменяется на `InMemoryRemoteStore`.
+    ///     поверх `.default`-URLSession; в превью/тестах подменяется на `InMemoryRemoteStore`.
     ///   - policy: политика ретраев очереди (классификация + backoff).
     init(
         catalogStore: CatalogStore,
@@ -87,7 +97,7 @@ final class BackupService: ObservableObject {
         self.documentsURL = documentsURL
         self.catalogFileURL = catalogFileURL
         self.policy = policy
-        self.store = store ?? BackupService.makeBackgroundStore(tokenProvider: tokenProvider, policy: policy)
+        self.store = store ?? BackupService.makeDefaultStore(tokenProvider: tokenProvider, policy: policy)
     }
 
     /// Путь к боевому каталогу (`Application Support/catalog.sqlite`) — зеркало
@@ -97,12 +107,18 @@ final class BackupService: ObservableObject {
         URL.applicationSupportDirectory.appendingPathComponent("catalog.sqlite")
     }
 
-    /// Боевой `YandexDiskStore` поверх ФОНОВОЙ URLSession (переживает сворачивание
-    /// приложения для длинных докачек). Идентификатор сессии стабилен на приложение.
-    private static func makeBackgroundStore(
+    /// Боевой `YandexDiskStore` поверх `URLSession` с `.default`-конфигом.
+    ///
+    /// MVP-выбор: высокоуровневый async-API (`data`/`upload`/`download`) поддерживается
+    /// только НЕ-фоновыми сессиями — на `background(withIdentifier:)`-конфиге эти методы
+    /// на устройстве бросают «Completion handler blocks are not supported in background
+    /// sessions». Поэтому передачи идут в активном приложении (фоновое аудио и так держит
+    /// процесс живым во время прослушивания). Полноценная фоновая доставка через
+    /// delegate-based задачи (`URLSessionHTTPClient.background(identifier:)`) — бэклог.
+    private static func makeDefaultStore(
         tokenProvider: any TokenProviding, policy: RetryPolicy
     ) -> any RemoteStore {
-        let http = URLSessionHTTPClient.background(identifier: "dev.zver.backup.session")
+        let http = URLSessionHTTPClient()
         let factory = YandexRequestFactory(
             baseURL: URL(string: "https://cloud-api.yandex.net/v1/disk")!,
             rootPrefix: "app:/"
@@ -465,20 +481,34 @@ final class BackupService: ObservableObject {
     /// регистрируется в `pendingCatalogWrites`, чтобы автобэкап мог дождаться записи
     /// перед заливкой `catalog.sqlite`.
     private func setState(_ relativePath: String, _ state: FileState, cloudSha: String? = nil) {
-        let catalogStore = self.catalogStore
-        let write = Task<Void, Never>.detached(priority: .utility) {
+        enqueueCatalogWrite { catalogStore in
             try? catalogStore.setFileState(relativePath: relativePath, state, cloudSha: cloudSha)
         }
-        pendingCatalogWrites.append(write)
     }
 
-    /// Помечает трек подтверждённым в облаке (после сверки sha). Хэндл детач-записи
-    /// регистрируется в `pendingCatalogWrites` (см. `setState`).
+    /// Помечает трек подтверждённым в облаке (после сверки sha). Запись — через ту же
+    /// сериализованную цепочку (см. `enqueueCatalogWrite`).
     private func markBackedUp(_ relativePath: String, cloudSha: String) {
-        let catalogStore = self.catalogStore
-        let write = Task<Void, Never>.detached(priority: .utility) {
+        enqueueCatalogWrite { catalogStore in
             try? catalogStore.markBackedUp(relativePath: relativePath, cloudSha: cloudSha)
         }
+    }
+
+    /// Ставит каталожную запись в СЕРИАЛИЗОВАННУЮ цепочку: новая `Task.detached` ждёт
+    /// завершения предыдущей (`catalogWriteTail`) и лишь затем выполняет синхронную
+    /// запись. Так порядок коммита в `dbQueue.write` совпадает с порядком вызовов
+    /// (события очереди приходят на MainActor по порядку: `uploading` раньше `backedUp`),
+    /// и трек не может застрять в промежуточном состоянии из-за переупорядочивания
+    /// независимых детач-задач. Хэндл регистрируется в `pendingCatalogWrites`, чтобы
+    /// `drainCatalogWrites` дождался слива перед заливкой `catalog.sqlite`.
+    private func enqueueCatalogWrite(_ op: @escaping @Sendable (CatalogStore) -> Void) {
+        let catalogStore = self.catalogStore
+        let previous = catalogWriteTail
+        let write = Task<Void, Never>.detached(priority: .utility) {
+            _ = await previous.value
+            op(catalogStore)
+        }
+        catalogWriteTail = write
         pendingCatalogWrites.append(write)
     }
 
