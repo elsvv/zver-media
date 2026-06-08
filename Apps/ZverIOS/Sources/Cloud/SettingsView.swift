@@ -17,6 +17,11 @@ struct SettingsView: View {
     @ObservedObject var account: CloudAccount
     @ObservedObject var store: LibraryStore
     @ObservedObject var backup: BackupService
+    /// Пульт с Мака (этап 5): секция «Пульт» (тумблер сервера, режим паузы, код
+    /// сопряжения, статус подключения) встраивается в этот же экран Настроек.
+    @ObservedObject var remote: RemoteControlService
+    /// Плеер — для пикера режима паузы в секции «Пульт» (`pauseMode`).
+    @ObservedObject var player: PlayerEngine
 
     @State private var tokenInput: String = ""
     @State private var errorMessage: String?
@@ -37,6 +42,7 @@ struct SettingsView: View {
             if account.isAuthorized {
                 backupSection
             }
+            RemoteSettingsView(remote: remote, player: player)
             aboutSection
         }
         .navigationTitle("Настройки")

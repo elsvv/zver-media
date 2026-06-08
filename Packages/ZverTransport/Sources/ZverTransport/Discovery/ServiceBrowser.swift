@@ -7,15 +7,21 @@ import Network
 /// и порт резолвятся позже (или при установке соединения). Тип чистый, не
 /// зависит от `Network`, `Sendable` для безопасной передачи через
 /// `@Sendable`-колбэки браузера.
+///
+/// `txt` — TXT-запись сервиса (`name`, `v`, `svc` и т.п.). Дефолт `[:]` —
+/// обратная совместимость с вызовами этапа 3, которые TXT не передавали.
+/// Роль (`svc`) читается через computed `role` (см. `ServiceRole.swift`).
 public struct DiscoveredService: Equatable, Sendable {
     public var name: String
     public var host: String?
     public var port: UInt16?
+    public var txt: [String: String]
 
-    public init(name: String, host: String? = nil, port: UInt16? = nil) {
+    public init(name: String, host: String? = nil, port: UInt16? = nil, txt: [String: String] = [:]) {
         self.name = name
         self.host = host
         self.port = port
+        self.txt = txt
     }
 }
 
@@ -52,7 +58,10 @@ public final class NWServiceBrowser: ServiceBrowser, @unchecked Sendable {
 
         let parameters = NWParameters()
         parameters.includePeerToPeer = true
-        let descriptor = NWBrowser.Descriptor.bonjour(type: zverServiceType, domain: nil)
+        // `bonjourWithTXTRecord` (а не `bonjour`) — чтобы `result.metadata` нёс
+        // TXT-запись сервиса. Без этого роль `svc` (этап 5) не доходила бы до
+        // браузера, и Mac не отличил бы пульт iPhone от синк-сервиса Мака.
+        let descriptor = NWBrowser.Descriptor.bonjourWithTXTRecord(type: zverServiceType, domain: nil)
         let browser = NWBrowser(for: descriptor, using: parameters)
         let registry = self.registry
 
@@ -66,7 +75,14 @@ public final class NWServiceBrowser: ServiceBrowser, @unchecked Sendable {
             }
             for result in results {
                 if case let .service(name, _, _, _) = result.endpoint {
-                    registry.add(DiscoveredService(name: name, host: nil, port: nil))
+                    registry.add(
+                        DiscoveredService(
+                            name: name,
+                            host: nil,
+                            port: nil,
+                            txt: Self.txtDictionary(from: result.metadata)
+                        )
+                    )
                 }
             }
             onChange(registry.services)
@@ -79,5 +95,15 @@ public final class NWServiceBrowser: ServiceBrowser, @unchecked Sendable {
     public func stop() {
         browser?.cancel()
         browser = nil
+    }
+
+    /// Извлекает TXT-запись из метаданных результата браузинга в чистый
+    /// `[String:String]`. `.none` (TXT отсутствует) → пустой словарь, что роль
+    /// трактует как `sync` (обратная совместимость этапа 3).
+    private static func txtDictionary(from metadata: NWBrowser.Result.Metadata) -> [String: String] {
+        if case let .bonjour(txtRecord) = metadata {
+            return txtRecord.dictionary
+        }
+        return [:]
     }
 }
