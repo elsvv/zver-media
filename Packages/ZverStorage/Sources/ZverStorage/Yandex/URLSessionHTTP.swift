@@ -45,12 +45,14 @@ public final class URLSessionHTTPClient: HTTPClient, @unchecked Sendable {
         self.session = session
     }
 
-    /// Фабрика фоновой сессии для докачки при свёрнутом/убитом приложении.
+    /// Фабрика фоновой сессии — ЗАГОТОВКА для будущей delegate-based фоновой доставки.
     ///
-    /// `delegate`/`delegateQueue` оставлены дефолтными: высокоуровневый async-API
-    /// (`data`/`upload`/`download`) обслуживается системой и резюмит continuation.
-    /// Полноценная фоновая доставка через делегат — задача интеграции (S4-10), здесь
-    /// предоставляется лишь конфигурируемая точка.
+    /// ВНИМАНИЕ: высокоуровневый async-API (`data`/`upload`/`download`) НЕ работает на
+    /// background-конфиге — на устройстве он бросает «Completion handler blocks are not
+    /// supported in background sessions»; фоновой сессии нужен delegate + `uploadTask`/
+    /// `downloadTask`. Поэтому боевой `BackupService` использует `.default`-сессию
+    /// (передачи в активном приложении), а этот метод оставлен как точка подключения
+    /// полноценной фоновой доставки (бэклог), которая потребует делегата.
     public static func background(identifier: String) -> URLSessionHTTPClient {
         let config = URLSessionConfiguration.background(withIdentifier: identifier)
         config.isDiscretionary = false
