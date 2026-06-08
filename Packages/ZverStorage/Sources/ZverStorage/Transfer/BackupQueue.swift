@@ -163,13 +163,30 @@ public actor BackupQueue {
             try await store.ensureFolder(path: parentFolder(of: item.remotePath))
             return try await store.upload(localFile: item.localFile, to: item.remotePath, progress: progress)
         case let .download(_, target, _):
+            // Смещение докачки пересчитываем от ФАКТИЧЕСКОГО размера файла на диске перед
+            // каждой попыткой, а не используем захваченный при enqueue `target.resumeFrom`.
+            // Иначе при транзиентном обрыве СЕРЕДИНЫ скачивания (стор успел записать часть
+            // хвоста, потом упал) ретрай дозаписал бы хвост от устаревшего смещения → файл
+            // вырос бы за размер и не сошёлся по sha. `target.resumeFrom` остаётся нижней
+            // границей: если файла ещё нет, качаем с него (0 в типичном случае).
+            let actualOffset = max(target.resumeFrom, currentFileSize(of: target.localFile))
             return try await store.download(
                 path: target.remotePath,
                 to: target.localFile,
-                resumeFrom: target.resumeFrom,
+                resumeFrom: actualOffset,
                 progress: progress
             )
         }
+    }
+
+    /// Фактический размер файла-приёмника на диске в байтах. Если файла нет/недоступен — `0`
+    /// (качаем заново). Источник истины для докачки между попытками ретрая.
+    private func currentFileSize(of url: URL) -> Int64 {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let size = attrs[.size] as? NSNumber else {
+            return 0
+        }
+        return size.int64Value
     }
 
     private func expectedSha(of direction: Direction) -> String? {
