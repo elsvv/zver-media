@@ -58,6 +58,18 @@ public final class Catalog: Sendable {
             }
         }
 
+        // v2: ярус хранения трека (этап 4 «Яндекс.Диск»). Аддитивна и
+        // идемпотентна — только ALTER TABLE ADD COLUMN. Существующие строки
+        // (физически на диске) получают fileState = 'local', cloudSha = NULL.
+        migrator.registerMigration("v2") { db in
+            try db.alter(table: "track") { t in
+                t.add(column: "fileState", .text)
+                    .notNull()
+                    .defaults(to: FileState.local.rawValue)
+                t.add(column: "cloudSha", .text)
+            }
+        }
+
         return migrator
     }
 }

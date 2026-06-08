@@ -21,6 +21,13 @@ final class LibraryStore: ObservableObject {
     private let playlistStore: PlaylistStore
     private let documentsURL: URL
 
+    /// Сервис облачного бэкапа (этап 4). Прокидывается извне после инициализации
+    /// (ContentView строит оба на общем `CatalogStore`). Обёртки `offload`/`download`/
+    /// `backupAll` дёргают его и republish'ат библиотеку — UI работает только через
+    /// `LibraryStore`, не зная про `BackupService` напрямую. `nil` (не залогинены /
+    /// сервис не подключён) → обёртки тихо no-op.
+    weak var backupService: BackupService?
+
     /// Guard от параллельных refresh: .task и .refreshable могут
     /// пересечься, второй вызов — no-op.
     private var isRefreshing = false
@@ -115,6 +122,51 @@ final class LibraryStore: ObservableObject {
         return await Task.detached(priority: .userInitiated) {
             (try? catalogStore.search(query, documentsURL: documentsURL)) ?? []
         }.value
+    }
+
+    // MARK: - Облако (обёртки над BackupService, этап 4)
+
+    /// «Выгрузить»: удаляет локальную копию трека, оставляя его только в облаке
+    /// (`backedUp` → `remote`). Делегирует ``BackupService/offload(track:)`` (гейт:
+    /// только `backedUp` с подтверждённым `cloudSha`, повторная сверка наличия в
+    /// облаке перед удалением). После — republish, чтобы бейдж стал ☁️. Возвращает
+    /// `true`, если файл выгружен.
+    @discardableResult
+    func offload(track: Track) async -> Bool {
+        guard let backupService else { return false }
+        let ok = await backupService.offload(track: track)
+        if ok { await refresh() }
+        return ok
+    }
+
+    /// «Скачать»: возвращает `remote`-трек на устройство из облака (докачка + сверка
+    /// sha), делегируя ``BackupService/download(track:)``. После — republish (бейдж
+    /// становится ☁️✓, ряд снова играбелен). Возвращает `true` при успехе.
+    @discardableResult
+    func download(track: Track) async -> Bool {
+        guard let backupService else { return false }
+        let ok = await backupService.download(track: track)
+        if ok { await refresh() }
+        return ok
+    }
+
+    /// Ставит в очередь и выгружает все `local`-треки (автобэкап) + бэкапит каталог.
+    /// Делегирует ``BackupService/backupAwaitingTracks()``, затем republish.
+    func backupAll() async {
+        guard let backupService else { return }
+        await backupService.backupAwaitingTracks()
+        await refresh()
+    }
+
+    /// Восстановление из облака: качает бэкап каталога, импортирует записи как
+    /// `remote`, republish. Делегирует ``BackupService/restore()``. Возвращает число
+    /// импортированных записей при успехе, `nil` — при ошибке/отсутствии сервиса.
+    @discardableResult
+    func restore() async -> Int? {
+        guard let backupService else { return nil }
+        let count = await backupService.restore()
+        if count != nil { await refresh() }
+        return count
     }
 
     // MARK: - Плейлисты

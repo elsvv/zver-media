@@ -12,11 +12,18 @@ struct SongsView: View {
             Section {
                 ForEach(Array(group.tracks.enumerated()), id: \.element.id) { index, track in
                     Button {
-                        engine.play(tracks: group.tracks, startAt: index)
+                        // remote-трек (файла нет) тапом качается, а не играет —
+                        // плеер этапа 1 не трогаем (см. TrackCloudActions).
+                        if track.fileState == .remote {
+                            Task { await store.download(track: track) }
+                        } else {
+                            engine.play(tracks: group.tracks, startAt: index)
+                        }
                     } label: {
                         trackRow(track)
                     }
                     .addToPlaylistMenu(for: track, store: store)
+                    .cloudActions(for: track, store: store)
                 }
             } header: {
                 albumHeader(group)
@@ -40,11 +47,12 @@ struct SongsView: View {
     }
 
     private func trackRow(_ track: Track) -> some View {
-        HStack {
+        HStack(spacing: 8) {
             Text(track.title)
                 .foregroundStyle(.primary)
                 .lineLimit(1)
             Spacer()
+            TrackCloudBadge(track: track)
             TrackFormatBadge(track: track)
         }
     }

@@ -18,11 +18,17 @@ struct AlbumDetailView: View {
             Section {
                 ForEach(Array(group.tracks.enumerated()), id: \.element.id) { index, track in
                     Button {
-                        engine.play(tracks: group.tracks, startAt: index)
+                        // remote-трек (файла нет) тапом качается, а не играет.
+                        if track.fileState == .remote {
+                            Task { await store.download(track: track) }
+                        } else {
+                            engine.play(tracks: group.tracks, startAt: index)
+                        }
                     } label: {
                         trackRow(track, fallbackNumber: index + 1)
                     }
                     .addToPlaylistMenu(for: track, store: store)
+                    .cloudActions(for: track, store: store)
                 }
             }
         }
@@ -90,6 +96,7 @@ struct AlbumDetailView: View {
                 .foregroundStyle(.primary)
                 .lineLimit(1)
             Spacer()
+            TrackCloudBadge(track: track)
             TrackFormatBadge(track: track)
         }
     }

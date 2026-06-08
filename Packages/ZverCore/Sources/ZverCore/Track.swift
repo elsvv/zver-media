@@ -13,10 +13,12 @@ public struct Track: Identifiable, Equatable, Hashable, Sendable {
     public var bitDepth: Int?
     public var fileExtension: String
     public var artworkFileURL: URL?   // обложка из файла в папке (folder.jpg и т.п.)
+    public var fileState: FileState   // ярус хранения локально/в облаке (этап 4)
 
     public init(url: URL, title: String, artist: String? = nil, album: String? = nil,
                 trackNumber: Int? = nil, year: Int? = nil, duration: Double,
-                sampleRate: Double, bitDepth: Int? = nil, artworkFileURL: URL? = nil) {
+                sampleRate: Double, bitDepth: Int? = nil, artworkFileURL: URL? = nil,
+                fileState: FileState = .local) {
         self.id = url.path
         self.url = url
         self.title = title
@@ -29,5 +31,6 @@ public struct Track: Identifiable, Equatable, Hashable, Sendable {
         self.bitDepth = bitDepth
         self.fileExtension = url.pathExtension.lowercased()
         self.artworkFileURL = artworkFileURL
+        self.fileState = fileState
     }
 }
