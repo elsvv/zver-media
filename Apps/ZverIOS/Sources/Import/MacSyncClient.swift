@@ -38,6 +38,8 @@ final class MacSyncClient: @unchecked Sendable {
         case decodingFailed
         /// Таймаут запроса.
         case timeout
+        /// Не удалось записать тело на диск (нет места/ошибка ФС).
+        case fileWriteFailed
     }
 
     /// Имя Bonjour-сервиса Мака (как пришло от браузера).
@@ -223,32 +225,41 @@ final class MacSyncClient: @unchecked Sendable {
     private static func exchange(connection: NWConnection,
                                  request: Data,
                                  queue: DispatchQueue) async throws -> Data {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data, Error>) in
-            // Гонка отмены/двойного резюма исключена флагом под актором-боксом:
-            // continuation резюмится ровно один раз. Box потокобезопасен через
-            // ту же сетевую очередь, на которую завязаны все колбэки соединения.
-            let box = ContinuationBox(continuation: continuation, connection: connection)
+        // `withTaskCancellationHandler`: когда `withRequestTimeout` отменяет операцию,
+        // отмена ДОЛЖНА порвать `NWConnection`, иначе против чёрной дыры (сервер принял
+        // TCP и молчит — типично под VPN/IPv6 half-open) continuation не резюмится,
+        // сокет течёт, а группа таймаута не может дренироваться. cancel() → .cancelled →
+        // box.failIfPending резюмит continuation (зеркало NWFileDownloader.run).
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data, Error>) in
+                // Гонка отмены/двойного резюма исключена флагом под актором-боксом:
+                // continuation резюмится ровно один раз. Box потокобезопасен через
+                // ту же сетевую очередь, на которую завязаны все колбэки соединения.
+                let box = ContinuationBox(continuation: continuation, connection: connection)
 
-            connection.stateUpdateHandler = { @Sendable state in
-                switch state {
-                case .ready:
-                    connection.send(content: request, completion: .contentProcessed { @Sendable error in
-                        if let error {
-                            box.fail(.connectionFailed, underlying: error)
-                            return
-                        }
-                        Self.receiveAll(connection: connection, accumulated: Data(), box: box)
-                    })
-                case let .failed(error):
-                    box.fail(.connectionFailed, underlying: error)
-                case .cancelled:
-                    box.failIfPending(.connectionFailed)
-                default:
-                    break
+                connection.stateUpdateHandler = { @Sendable state in
+                    switch state {
+                    case .ready:
+                        connection.send(content: request, completion: .contentProcessed { @Sendable error in
+                            if let error {
+                                box.fail(.connectionFailed, underlying: error)
+                                return
+                            }
+                            Self.receiveAll(connection: connection, accumulated: Data(), box: box)
+                        })
+                    case let .failed(error):
+                        box.fail(.connectionFailed, underlying: error)
+                    case .cancelled:
+                        box.failIfPending(.connectionFailed)
+                    default:
+                        break
+                    }
                 }
-            }
 
-            connection.start(queue: queue)
+                connection.start(queue: queue)
+            }
+        } onCancel: {
+            connection.cancel()
         }
     }
 

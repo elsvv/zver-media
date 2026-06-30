@@ -66,4 +66,18 @@ import Foundation
         let second = AlbumIdentity.folderName(artist: "Portishead", title: "Dummy", year: 1994)
         #expect(first == second)
     }
+
+    @Test func dotOnlyTitleFallsBackToUnknownAlbum() {
+        // id "." / ".." сделал бы путь /album/./<file>, который HTTPRouter режет как
+        // traversal → файлы 404 навсегда. Должны откатиться к "Unknown Album".
+        #expect(AlbumIdentity.folderName(artist: nil, title: ".", year: nil) == "Unknown Album")
+        #expect(AlbumIdentity.folderName(artist: nil, title: "..", year: nil) == "Unknown Album")
+        #expect(AlbumIdentity.folderName(artist: "  ", title: " .. ", year: nil) == "Unknown Album")
+    }
+
+    @Test func dotInsideLongerTitleIsKept() {
+        // Точка не сама по себе — это валидный сегмент, не трогаем.
+        let name = AlbumIdentity.folderName(artist: "A", title: ".", year: nil)
+        #expect(name == "A - .")
+    }
 }

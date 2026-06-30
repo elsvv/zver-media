@@ -149,4 +149,27 @@ import Foundation
         // Разбивка только по первому двоеточию.
         #expect(request.headers["if-range"] == "\"abc:def:123\"")
     }
+
+    // MARK: - Завершённый, но битый запрос → .invalid (не вечный .needMore)
+
+    @Test func completeButMalformedRequestLineIsInvalid() {
+        var parser = HTTPRequestParser()
+        // Терминатор есть, но request-line из одного токена — это не «нужно ещё
+        // байт», а битый запрос: должен прийти .invalid (сервер ответит 400).
+        let result = parser.feed(bytes("PING\r\n\r\n"))
+        #expect({ if case .invalid = result { return true } else { return false } }())
+    }
+
+    @Test func emptyRequestLineIsInvalid() {
+        var parser = HTTPRequestParser()
+        let result = parser.feed(bytes("\r\n\r\n"))
+        #expect({ if case .invalid = result { return true } else { return false } }())
+    }
+
+    @Test func partialHeadersStillNeedMoreNotInvalid() {
+        var parser = HTTPRequestParser()
+        // Нет терминатора — по-прежнему .needMore (не путаем с битым).
+        let result = parser.feed(bytes("GET /manifest HTTP/1.1\r\nHost: z"))
+        #expect({ if case .needMore = result { return true } else { return false } }())
+    }
 }

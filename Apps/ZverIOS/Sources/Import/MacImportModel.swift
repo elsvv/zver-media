@@ -52,6 +52,10 @@ final class MacImportModel: ObservableObject {
     /// Рескан каталога после раскладки альбома (обёртка над `LibraryStore.refresh`).
     private let rescan: @MainActor () async -> Void
     private var isBrowsing = false
+    /// Токен текущей сессии (тот, которым успешно загрузился манифест). Держим в
+    /// памяти, чтобы импорт работал, даже если запись токена в Keychain не удалась
+    /// (иначе `startImport` перечитывал бы Keychain и тихо ничего не делал).
+    private var activeToken: String?
 
     init(browser: ServiceBrowser = NWServiceBrowser(),
          keyStore: KeyStore = KeychainKeyStore(),
@@ -78,9 +82,13 @@ final class MacImportModel: ObservableObject {
         isBrowsing = true
         browser.start { [weak self] services in
             // @Sendable-колбэк на сетевой очереди: не трогаем self напрямую,
-            // прыгаем на MainActor.
+            // прыгаем на MainActor. Фильтруем по роли: на общем типе `_zver._tcp`
+            // живут и синк-сервер Мака (svc отсутствует → sync), и пульт-сервер
+            // iPhone (svc=remote). В список «Маков» берём только sync — иначе тап по
+            // пульт-сервису слал бы HTTP /pair в WebSocket-сервер (таймаут/мусор).
+            let macs = services.filter { $0.role == ServiceTXT.sync }
             Task { @MainActor [weak self] in
-                self?.discoveredMacs = services
+                self?.discoveredMacs = macs
             }
         }
     }
@@ -112,6 +120,7 @@ final class MacImportModel: ObservableObject {
     /// Сбрасывает выбор и возвращается к списку Маков.
     func deselect() {
         selectedMac = nil
+        activeToken = nil
         phase = .idle
     }
 
@@ -145,6 +154,7 @@ final class MacImportModel: ObservableObject {
     /// (например, токен Мака протух) — сбрасываем сохранённый токен.
     func resetPairing() {
         guard let mac = selectedMac else { return }
+        activeToken = nil
         try? keyStore.delete(forService: serviceKey(for: mac))
         phase = .needsCode
     }
@@ -159,9 +169,11 @@ final class MacImportModel: ObservableObject {
         Task { @MainActor in
             do {
                 let manifest = try await client.fetchManifest(token: token)
+                activeToken = token
                 phase = .ready(manifest)
             } catch let MacSyncClient.ClientError.httpStatus(code) where code == 401 || code == 403 {
                 // Токен больше не принимается — забываем его, просим код заново.
+                activeToken = nil
                 try? keyStore.delete(forService: service)
                 phase = .needsCode
             } catch {
@@ -179,7 +191,7 @@ final class MacImportModel: ObservableObject {
         guard importCoordinator == nil,
               let mac = selectedMac,
               case let .ready(manifest) = phase,
-              let token = keyStore.token(forService: serviceKey(for: mac))
+              let token = activeToken
         else { return }
 
         let serviceName = mac.name
@@ -240,6 +252,8 @@ final class MacImportModel: ObservableObject {
         case MacSyncClient.ClientError.decodingFailed,
              MacSyncClient.ClientError.malformedResponse:
             return "Не удалось разобрать ответ Мака."
+        case MacSyncClient.ClientError.fileWriteFailed:
+            return "Не удалось сохранить файл — возможно, на устройстве закончилось место."
         default:
             return "Что-то пошло не так. Повторите попытку."
         }
