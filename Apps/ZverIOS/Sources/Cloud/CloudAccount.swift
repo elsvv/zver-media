@@ -6,8 +6,8 @@ import ZverTransport
 /// `TokenProviding` для `YandexDiskStore`.
 ///
 /// **MVP-вход — ручной отладочный токен** (см. шапку плана этапа 4): владелец
-/// получает ~годовой OAuth-токен (scope `cloud_api:disk.app_folder`) и вставляет
-/// его в Настройках. Полноценный `ASWebAuthenticationSession`-вход требует
+/// получает ~годовой OAuth-токен (права `cloud_api:disk.read` + `cloud_api:disk.write`,
+/// контент в папке `zver-media` в корне Диска) и вставляет его в Настройках. Полноценный `ASWebAuthenticationSession`-вход требует
 /// зарегистрированного на oauth.yandex.ru приложения (`client_id`) — отложен
 /// (заготовка живёт в `ZverStorage/Auth`, активируется позже без правок этого типа).
 ///

@@ -178,7 +178,9 @@ final class NWFileDownloader: RangeDownloading, @unchecked Sendable {
                     connection: connection,
                     destination: destination,
                     resumeFrom: resumeFrom,
-                    progress: progress
+                    progress: progress,
+                    idleTimeout: idleTimeout,
+                    timerQueue: queue
                 )
 
                 connection.stateUpdateHandler = { @Sendable state in
@@ -201,6 +203,10 @@ final class NWFileDownloader: RangeDownloading, @unchecked Sendable {
                 }
 
                 connection.start(queue: queue)
+                // Сторож бездействия: если за idleTimeout не пришло ни байта (зависшее
+                // соединение — Mac уснул / Wi-Fi отвалился / VPN-utun флапнул без RST) —
+                // рвём и фейлим. Без этого continuation не резюмится никогда.
+                sink.startIdleWatchdog()
             }
         } onCancel: {
             connection.cancel()
@@ -243,19 +249,68 @@ private final class DownloadSink: @unchecked Sendable {
     private var headParsed = false
     private var handle: FileHandle?
     private var bytesOnDisk: Int64 = 0
+    /// Ошибка записи на диск (нет места и т.п.), пойманная под замком в `writeLocked`;
+    /// фейлим ею вне замка (resume берёт тот же замок).
+    private var writeFailure: Error?
+
+    // Сторож бездействия (rank 2): один повторяющийся таймер на сетевой очереди
+    // проверяет, приходили ли байты; при простое дольше idleTimeout — fail(.timeout).
+    private let idleTimeout: TimeInterval
+    private let timerQueue: DispatchQueue
+    private var idleTimer: DispatchSourceTimer?
+    private var lastActivity = DispatchTime.now()
 
     init(
         continuation: CheckedContinuation<Int64, Error>,
         connection: NWConnection,
         destination: URL,
         resumeFrom: Int64,
-        progress: @escaping @Sendable (Int64) -> Void
+        progress: @escaping @Sendable (Int64) -> Void,
+        idleTimeout: TimeInterval,
+        timerQueue: DispatchQueue
     ) {
         self.continuation = continuation
         self.connection = connection
         self.destination = destination
         self.resumeFrom = resumeFrom
         self.progress = progress
+        self.idleTimeout = idleTimeout
+        self.timerQueue = timerQueue
+    }
+
+    /// Заводит повторяющийся таймер бездействия на сетевой очереди. Срабатывает,
+    /// если с последнего полученного байта прошло >= idleTimeout (детект-латентность
+    /// до 2×idleTimeout — приемлемо, churn нулевой). Вызывать один раз из `run`.
+    func startIdleWatchdog() {
+        guard idleTimeout > 0 else { return }
+        lock.lock()
+        lastActivity = DispatchTime.now()
+        let timer = DispatchSource.makeTimerSource(queue: timerQueue)
+        timer.schedule(deadline: .now() + idleTimeout, repeating: idleTimeout)
+        timer.setEventHandler { [weak self] in
+            guard let self else { return }
+            let idleNanos = DispatchTime.now().uptimeNanoseconds &- self.lastActivitySnapshot().uptimeNanoseconds
+            if Double(idleNanos) >= self.idleTimeout * 1_000_000_000 {
+                self.fail(.timeout)
+            }
+        }
+        idleTimer = timer
+        lock.unlock()
+        timer.resume()
+    }
+
+    private func lastActivitySnapshot() -> DispatchTime {
+        lock.lock(); defer { lock.unlock() }
+        return lastActivity
+    }
+
+    private func noteActivity() {
+        lock.lock(); lastActivity = DispatchTime.now(); lock.unlock()
+    }
+
+    private func cancelIdleTimer() {
+        idleTimer?.cancel()
+        idleTimer = nil
     }
 
     /// Скармливает очередную порцию байт: пока заголовки не разобраны — копит их;
@@ -263,6 +318,7 @@ private final class DownloadSink: @unchecked Sendable {
     func feed(_ data: Data) {
         lock.lock()
         guard continuation != nil else { lock.unlock(); return }
+        lastActivity = DispatchTime.now() // пришли байты — сбрасываем сторож бездействия
 
         if !headParsed {
             headerBuffer.append(data)
@@ -298,13 +354,17 @@ private final class DownloadSink: @unchecked Sendable {
             if !leftover.isEmpty {
                 writeLocked(leftover)
             }
+            let failure = writeFailure
             lock.unlock()
+            if let failure { fail(.fileWriteFailed, underlying: failure); return }
             progress(bytesOnDiskSnapshot())
             return
         }
 
         writeLocked(data)
+        let failure = writeFailure
         lock.unlock()
+        if let failure { fail(.fileWriteFailed, underlying: failure); return }
         progress(bytesOnDiskSnapshot())
     }
 
@@ -312,6 +372,7 @@ private final class DownloadSink: @unchecked Sendable {
     func finish() {
         lock.lock()
         guard let continuation else { lock.unlock(); return }
+        cancelIdleTimer()
         guard headParsed else {
             // EOF до заголовков — оборванный ответ.
             self.continuation = nil
@@ -359,14 +420,16 @@ private final class DownloadSink: @unchecked Sendable {
         }
     }
 
-    /// Пишет порцию тела (вызывать под замком).
+    /// Пишет порцию тела (вызывать под замком). Ошибку записи (нет места и т.п.)
+    /// фиксируем в `writeFailure` — вызывающий после разблокировки фейлит загрузку
+    /// (иначе тихая потеря байтов → ложная ошибка контрольной суммы и 2× трафик).
     private func writeLocked(_ data: Data) {
-        guard let handle else { return }
+        guard let handle, writeFailure == nil else { return }
         do {
             try handle.write(contentsOf: data)
             bytesOnDisk += Int64(data.count)
         } catch {
-            // Ошибка записи на диск — фейлим вне замка через resume-обёртку.
+            writeFailure = error
         }
     }
 
@@ -378,6 +441,7 @@ private final class DownloadSink: @unchecked Sendable {
     private func resume(_ action: (CheckedContinuation<Int64, Error>) -> Void) {
         lock.lock()
         guard let continuation else { lock.unlock(); return }
+        cancelIdleTimer()
         self.continuation = nil
         try? handle?.close()
         handle = nil

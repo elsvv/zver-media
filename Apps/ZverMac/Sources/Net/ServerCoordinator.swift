@@ -40,18 +40,35 @@ final class ServerCoordinator: ObservableObject {
     private let autoStart: Bool
 
     private var cancellables: Set<AnyCancellable> = []
+    /// Поколение запуска сервера. Каждый `startIfNeeded`/`stop` его двигает; асинхронный
+    /// `onReady`/`onFailure` применяется ТОЛЬКО если поколение не сменилось — иначе
+    /// поздний `onReady` от уже остановленного слушателя воскресил бы `.running` с
+    /// nil-листенером, и `startIfNeeded` (`if case .running { return }`) больше не
+    /// поднял бы сервер (зеркало epoch-guard пульта, коммит 6154e47).
+    private var serverEpoch = 0
 
     init(queue: OutgoingQueue,
          serviceName: String = PairingHostController.defaultServiceName,
          autoStart: Bool = true) {
         let state = HostState()
+
+        // Восстанавливаем ранее выпущенный сессионный токен из Keychain в HostState,
+        // чтобы уже спаренный телефон оставался авторизован после перезапуска
+        // приложения. Без этого GET /manifest с валидным X-Zver-Token упирался бы в
+        // пустой набор токенов → 401 → телефон забывал токен и требовал код заново на
+        // КАЖДЫЙ старт Мака (ровно то, ради чего токен зеркалился в Keychain).
+        let keyStore = KeychainKeyStore()
+        if let savedToken = keyStore.token(forService: serviceName), !savedToken.isEmpty {
+            state.registerToken(savedToken)
+        }
+
         let host = SyncHost(queue: queue, state: state)
 
         self.queue = queue
         self.host = host
         self.serviceName = serviceName
         self.autoStart = autoStart
-        self.pairing = PairingHostController(state: state, serviceName: serviceName)
+        self.pairing = PairingHostController(state: state, keyStore: keyStore, serviceName: serviceName)
 
         // confirm от телефона приходит на сетевой очереди (@Sendable) → прыгаем
         // на @MainActor в модель: снимаем альбом с очереди и пересобираем снимок.
@@ -69,6 +86,15 @@ final class ServerCoordinator: ObservableObject {
                 pairingController.persistIssuedTokenIfNeeded(token)
             }
         }
+
+        // SwiftUI наблюдает только этот объект, но код сопряжения/статус живут во
+        // ВЛОЖЕННОМ ObservableObject (`pairing`). Без ретрансляции его изменений
+        // появление 6-значного кода (`pairing.open()`) не перерисовывает UI —
+        // кнопка «Сопрячь iPhone» нажимается, а цифры не показываются. Пробрасываем
+        // objectWillChange вложенного контроллера как свой.
+        pairing.objectWillChange
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
 
         // Сервер раздаёт ровно текущую очередь — пересобираем снимок и
         // стартуем/гасим сервер при каждом её изменении.
@@ -105,27 +131,37 @@ final class ServerCoordinator: ObservableObject {
     private func startIfNeeded() {
         if case .running = status { return }
 
+        serverEpoch += 1
+        let epoch = serverEpoch
         fileServer.start(
             serviceName: serviceName,
             txt: ["name": serviceName, "v": String(SyncManifest.currentProtocolVersion)],
             onReady: { port in
                 // На сетевой очереди → в @MainActor: фиксируем статус (Bonjour
-                // уже опубликован самим слушателем до его старта).
+                // уже опубликован самим слушателем до его старта). Игнорируем, если
+                // сервер уже остановлен/перезапущен (поколение сменилось).
                 Task { @MainActor [weak self] in
-                    self?.status = .running(port: port)
+                    guard let self, self.serverEpoch == epoch else { return }
+                    self.status = .running(port: port)
                 }
             },
             onFailure: { _ in
                 Task { @MainActor [weak self] in
-                    self?.status = .failed("Не удалось запустить сервер раздачи.")
+                    guard let self, self.serverEpoch == epoch else { return }
+                    self.status = .failed("Не удалось запустить сервер раздачи.")
                 }
             }
         )
     }
 
-    /// Останавливает сервер (со снятием Bonjour-анонса вместе со слушателем).
+    /// Останавливает сервер (со снятием Bonjour-анонса вместе со слушателем) и
+    /// закрывает окно сопряжения: иначе UI продолжал бы показывать 6-значный код,
+    /// которым телефон уже не достучится (листенер и Bonjour сняты), а одноразовый
+    /// код оставался бы взведённым в `HostState`.
     func stop() {
+        serverEpoch += 1
         fileServer.stop()
+        pairing.close()
         status = .stopped
     }
 

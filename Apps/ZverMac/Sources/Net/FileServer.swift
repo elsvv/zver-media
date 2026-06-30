@@ -40,6 +40,12 @@ final class FileServer: @unchecked Sendable {
 
     private var listener: NWListener?
 
+    /// Живые обработчики соединений. БЕЗ этого удержания `ConnectionHandler`
+    /// деаллоцируется сразу после `newConnectionHandler` (колбэки `NWConnection`
+    /// держат его слабо), `.ready → self?.receive()` ловит `nil`, и сервер не
+    /// читает запрос и не отвечает — телефон висит на «подключаемся».
+    private let active = ActiveConnections()
+
     init(state: HostState,
          chunkSize: Int = 1 << 20,
          onConfirm: @escaping @Sendable (String) -> Void) {
@@ -104,8 +110,9 @@ final class FileServer: @unchecked Sendable {
             }
         }
 
-        // Новое соединение: заводим обработчик, который сам стартует приём на
-        // сетевой очереди сервера.
+        // Новое соединение: заводим обработчик, УДЕРЖИВАЕМ его в `active` (иначе ARC
+        // снесёт его до первого `receive`), снимаем удержание по закрытию.
+        let active = self.active
         listener.newConnectionHandler = { @Sendable connection in
             let handler = ConnectionHandler(
                 connection: connection,
@@ -114,6 +121,10 @@ final class FileServer: @unchecked Sendable {
                 queue: connectionQueue,
                 onConfirm: onConfirm
             )
+            active.insert(handler)
+            handler.onClose = { @Sendable [weak handler, weak active] in
+                if let handler, let active { active.remove(handler) }
+            }
             handler.start()
         }
 
@@ -126,6 +137,28 @@ final class FileServer: @unchecked Sendable {
     func stop() {
         listener?.cancel()
         listener = nil
+        active.removeAll()
+    }
+}
+
+/// Потокобезопасный реестр живых обработчиков соединений: удерживает их, пока
+/// соединение не закроется. Решает баг преждевременной деаллокации
+/// `ConnectionHandler` (колбэки `NWConnection` держат его слабо). Колбэки
+/// `newConnectionHandler`/`close` приходят с сетевой очереди — доступ под `NSLock`.
+private final class ActiveConnections: @unchecked Sendable {
+    private let lock = NSLock()
+    private var handlers: [ObjectIdentifier: ConnectionHandler] = [:]
+
+    func insert(_ handler: ConnectionHandler) {
+        lock.lock(); handlers[ObjectIdentifier(handler)] = handler; lock.unlock()
+    }
+
+    func remove(_ handler: ConnectionHandler) {
+        lock.lock(); handlers[ObjectIdentifier(handler)] = nil; lock.unlock()
+    }
+
+    func removeAll() {
+        lock.lock(); handlers.removeAll(); lock.unlock()
     }
 }
 
@@ -156,6 +189,19 @@ private final class ConnectionHandler: @unchecked Sendable {
     private var rawBuffer = Data()
     private var headersParsed = false
     private var finished = false
+    /// Сработал ли уже `close()` (чтобы `onClose` вызвался ровно один раз).
+    private var didClose = false
+
+    /// Потолок блока заголовков: пир, не шлющий `CRLFCRLF`, не должен раздуть буфер
+    /// безразмерно (OOM менюбар-процесса). 64 КБ с запасом хватает любому запросу синка.
+    private static let maxHeaderBytes = 64 * 1024
+    /// Потолок тела POST: `/pair`/`/confirm` — крошечный JSON. Безразмерный
+    /// `Content-Length` от пира не буферизуем.
+    private static let maxBodyBytes = 64 * 1024
+
+    /// Зовётся ровно один раз при закрытии соединения — сервер снимает удержание
+    /// обработчика. Ставится после `init` в `newConnectionHandler`.
+    var onClose: (@Sendable () -> Void)?
 
     init(connection: NWConnection,
          state: HostState,
@@ -217,9 +263,27 @@ private final class ConnectionHandler: @unchecked Sendable {
             rawBuffer.append(data)
             switch parser.feed(data) {
             case .needMore:
+                // Защита от безразмерного буфера заголовков (пир молчит/мусорит и
+                // никогда не шлёт CRLFCRLF).
+                if rawBuffer.count > Self.maxHeaderBytes {
+                    lock.unlock()
+                    sendStatusOnly(431, reason: "Request Header Fields Too Large")
+                    return
+                }
                 lock.unlock()
                 return
+            case .invalid:
+                // Терминатор есть, но запрос битый — 400 и закрываемся (не виснем).
+                lock.unlock()
+                sendStatusOnly(400, reason: "Bad Request")
+                return
             case let .request(req):
+                // Безразмерный Content-Length не буферизуем (тела протокола крошечные).
+                if req.contentLength > Self.maxBodyBytes {
+                    lock.unlock()
+                    sendStatusOnly(413, reason: "Payload Too Large")
+                    return
+                }
                 headersParsed = true
                 request = req
                 bodyRemaining = req.contentLength
@@ -508,12 +572,15 @@ private final class ConnectionHandler: @unchecked Sendable {
         })
     }
 
-    /// Закрывает соединение ровно один раз.
+    /// Закрывает соединение ровно один раз и снимает удержание обработчика.
     private func close() {
         lock.lock()
         finished = true
+        let alreadyClosed = didClose
+        didClose = true
         lock.unlock()
         connection.cancel()
+        if !alreadyClosed { onClose?() }
     }
 
     // MARK: - MIME

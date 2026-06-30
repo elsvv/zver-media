@@ -36,7 +36,12 @@ public enum AlbumIdentity {
         }
 
         let trimmed = result.trimmingCharacters(in: .whitespaces)
-        return trimmed.isEmpty ? "Unknown Album" : trimmed
+        // "." и ".." — валидные имена ФС, но как сегмент пути их режет HTTPRouter
+        // (traversal), и файлы такого альбома 404-ят навсегда. Откатываемся к фоллбэку.
+        if trimmed.isEmpty || trimmed == "." || trimmed == ".." {
+            return "Unknown Album"
+        }
+        return trimmed
     }
 
     /// Вырезает управляющие символы, заменяет небезопасные для ФС символы на

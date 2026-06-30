@@ -35,6 +35,10 @@ public struct HTTPRequestParser: Sendable {
         case needMore
         /// Заголовки полностью разобраны.
         case request(HTTPRequest)
+        /// Терминатор `CRLFCRLF` пришёл, но request-line битый (нет метода/таргета) —
+        /// это НЕ «нужно ещё байт». Сервер должен ответить 400 и закрыться, иначе
+        /// соединение висит вечно в `.needMore`, держа обработчик.
+        case invalid
     }
 
     /// Накопленный сырой поток заголовков.
@@ -58,7 +62,8 @@ public struct HTTPRequestParser: Sendable {
 
         let headerData = buffer[buffer.startIndex..<terminatorRange.lowerBound]
         guard let request = Self.parseHeaderBlock(headerData) else {
-            return .needMore
+            // Терминатор есть, но блок не разобрался → запрос битый, не «неполный».
+            return .invalid
         }
         return .request(request)
     }

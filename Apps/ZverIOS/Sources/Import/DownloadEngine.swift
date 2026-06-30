@@ -70,16 +70,41 @@ struct DownloadEngine {
             progress(min(1.0, Double(onDisk) / Double(expected)))
         }
 
-        // Первая попытка — с докачкой от существующего частичного файла.
+        // Стартовая позиция докачки = размер уже скачанного частичного файла.
         var resumeFrom = partialSize(partial)
-        var verifiedURL = try await downloadAndVerify(
-            planned: planned,
-            partial: partial,
-            resumeFrom: resumeFrom,
-            progress: reportProgress
-        )
+        var verifiedURL: URL?
 
-        // Sha не совпал — частичный файл битый/устаревший: качаем с нуля.
+        // Частичный файл уже >= ожидаемого размера: докачка дала бы `Range` за концом
+        // файла → сервер вернёт 416, и без обработки это вечный затык (партиал не
+        // удаляется, каждый ретрай повторяет тот же запрос). Сверяем имеющийся файл
+        // напрямую: sha совпал — он и есть готовый; нет (устаревший/пересжатый) —
+        // выкидываем и качаем с нуля.
+        if expected > 0, resumeFrom >= expected {
+            if (try? Sha256.hash(fileURL: partial)) == planned.sha256 {
+                verifiedURL = partial
+            } else {
+                try? FileManager.default.removeItem(at: partial)
+                resumeFrom = 0
+            }
+        }
+
+        // Докачка от текущей позиции. 416 (сервер отверг Range — устаревший партиал)
+        // трактуем как «перекачать с нуля», а не как фатальную ошибку.
+        if verifiedURL == nil {
+            do {
+                verifiedURL = try await downloadAndVerify(
+                    planned: planned,
+                    partial: partial,
+                    resumeFrom: resumeFrom,
+                    progress: reportProgress
+                )
+            } catch let MacSyncClient.ClientError.httpStatus(code) where code == 416 {
+                verifiedURL = nil
+            }
+        }
+
+        // Sha не совпал ИЛИ сервер отверг Range — частичный файл битый/устаревший:
+        // удаляем и качаем целиком с нуля (одна повторная попытка).
         if verifiedURL == nil {
             try? FileManager.default.removeItem(at: partial)
             resumeFrom = 0

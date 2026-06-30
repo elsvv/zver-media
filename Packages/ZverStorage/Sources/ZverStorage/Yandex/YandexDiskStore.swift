@@ -100,13 +100,22 @@ public final class YandexDiskStore: RemoteStore, @unchecked Sendable {
     }
 
     public func ensureFolder(path: String) async throws {
-        let request = factory.createFolder(path: path)
-        let (data, http) = try await send(request)
-        // 201 — создана; 409 — уже существует (идемпотентность). Прочее — ошибка.
-        if http.statusCode == 201 || http.statusCode == 409 {
-            return
+        // Яндекс.Диск `createFolder` создаёт ТОЛЬКО лист — родитель должен
+        // существовать. Для вложенного пути (`zver-media/library/<albumId>`)
+        // поднимаемся от корня и создаём каждый сегмент по очереди. 201 (создана)
+        // и 409 (уже есть) — оба успех (идемпотентность).
+        let segments = path.split(separator: "/").map(String.init)
+        guard !segments.isEmpty else { return }
+        var cumulative = ""
+        for segment in segments {
+            cumulative = cumulative.isEmpty ? segment : "\(cumulative)/\(segment)"
+            let request = factory.createFolder(path: cumulative)
+            let (data, http) = try await send(request)
+            if http.statusCode == 201 || http.statusCode == 409 {
+                continue
+            }
+            try ensureSuccess(http, data: data)
         }
-        try ensureSuccess(http, data: data)
     }
 
     public func upload(

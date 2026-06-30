@@ -121,7 +121,10 @@ final class BackupService: ObservableObject {
         let http = URLSessionHTTPClient()
         let factory = YandexRequestFactory(
             baseURL: URL(string: "https://cloud-api.yandex.net/v1/disk")!,
-            rootPrefix: "app:/"
+            // Полный Диск + выделенная папка `zver-media` (первый сегмент путей в
+            // `CloudPaths`), чтобы контент лежал в одной видимой папке, а не в корне
+            // аккаунта. Требует токена со scope `cloud_api:disk.read`+`disk.write`.
+            rootPrefix: "disk:/"
         )
         return YandexDiskStore(
             http: http, factory: factory, tokenProvider: tokenProvider, policy: policy
@@ -190,6 +193,10 @@ final class BackupService: ObservableObject {
         guard FileManager.default.fileExists(atPath: catalogFileURL.path) else { return }
         let store = self.store
         do {
+            // Бэкап каталога идёт мимо BackupQueue (которая сама гарантирует папку
+            // трека), поэтому базовую папку `zver-media` создаём здесь — иначе на
+            // чистом Диске самый первый бэкап (каталог без новых треков) упал бы.
+            try? await store.ensureFolder(path: CloudPaths.remoteBase)
             _ = try await store.upload(
                 localFile: catalogFileURL,
                 to: CloudPaths.catalogBackupName,
