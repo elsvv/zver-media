@@ -247,6 +247,79 @@ import Foundation
         #expect(infos.first?.title == "notags")
     }
 
+    // MARK: - M3U playlist ordering
+
+    private func writePlaylist(_ text: String, named name: String = "Playlist.m3u", into folder: URL) throws {
+        try Data(text.utf8).write(to: folder.appendingPathComponent(name))
+    }
+
+    @Test func playlistAssignsTrackNumbersByPosition() async throws {
+        // notags.flac не имеет TRACKNUMBER → без плейлиста trackNumber == nil.
+        // Имена подобраны так, что алфавитный порядок ОБРАТЕН порядку плейлиста.
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        let sub = tmp.appendingPathComponent("Альбом")
+        try FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+        let fm = FileManager.default
+        try fm.copyItem(at: fixture("notags.flac"), to: sub.appendingPathComponent("zebra.flac"))
+        try fm.copyItem(at: fixture("notags.flac"), to: sub.appendingPathComponent("alpha.flac"))
+        try writePlaylist("zebra.flac\nalpha.flac\n", into: sub)
+
+        let infos = try await LibraryScanner.scan(directory: tmp)
+        let zebra = infos.first { $0.url.lastPathComponent == "zebra.flac" }
+        let alpha = infos.first { $0.url.lastPathComponent == "alpha.flac" }
+        #expect(zebra?.trackNumber == 1)
+        #expect(alpha?.trackNumber == 2)
+    }
+
+    @Test func playlistOverridesFileTagTrackNumber() async throws {
+        // Две копии одного фикстура с ОДИНАКОВЫМ тегом trackNumber. Плейлист задаёт
+        // им разные позиции (2 и 1) — значит число пришло из m3u, а не из тега.
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        let sub = tmp.appendingPathComponent("Альбом")
+        try FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+        let fm = FileManager.default
+        try fm.copyItem(at: fixture("tagged_16_44.flac"), to: sub.appendingPathComponent("one.flac"))
+        try fm.copyItem(at: fixture("tagged_16_44.flac"), to: sub.appendingPathComponent("two.flac"))
+        try writePlaylist("two.flac\none.flac\n", into: sub)
+
+        let infos = try await LibraryScanner.scan(directory: tmp)
+        #expect(infos.first { $0.url.lastPathComponent == "two.flac" }?.trackNumber == 1)
+        #expect(infos.first { $0.url.lastPathComponent == "one.flac" }?.trackNumber == 2)
+    }
+
+    @Test func sidecarTrackNumberWinsOverPlaylist() async throws {
+        // Sidecar — деднамеренная правка с Мака, побеждает порядок плейлиста.
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        let sub = tmp.appendingPathComponent("Альбом")
+        try FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(
+            at: fixture("notags.flac"), to: sub.appendingPathComponent("track.flac"))
+        try writePlaylist("track.flac\n", into: sub) // m3u-позиция = 1
+        try writeSidecar("""
+        {"version":1,"tracks":{"track.flac":{"trackNumber":9}}}
+        """, into: sub)
+
+        let infos = try await LibraryScanner.scan(directory: tmp)
+        #expect(infos.first?.trackNumber == 9)
+    }
+
+    @Test func m3uFileNotScannedAsAudio() async throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        let sub = tmp.appendingPathComponent("Альбом")
+        try FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(
+            at: fixture("notags.flac"), to: sub.appendingPathComponent("track.flac"))
+        try writePlaylist("track.flac\n", into: sub)
+
+        let infos = try await LibraryScanner.scan(directory: tmp)
+        #expect(infos.count == 1)
+        #expect(infos.first?.url.lastPathComponent == "track.flac")
+    }
+
     @Test func sidecarLeavesUnmentionedTracksUntouched() async throws {
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)

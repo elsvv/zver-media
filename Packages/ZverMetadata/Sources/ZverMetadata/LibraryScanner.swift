@@ -35,6 +35,7 @@ public enum LibraryScanner {
         var infos: [AudioFileInfo] = []
         var artworkByFolder: [String: URL?] = [:]
         var sidecarByFolder: [String: AlbumSidecar?] = [:]
+        var playlistByFolder: [String: [String: Int]] = [:]
         for url in urls {
             guard var info = try? await MetadataReader.read(url: url) else { continue }
             let parent = url.deletingLastPathComponent().standardizedFileURL
@@ -47,6 +48,22 @@ public enum LibraryScanner {
                 let loaded = loadSidecar(inFolder: parent)
                 sidecarByFolder[parent.path] = loaded
                 sidecar = loaded
+            }
+
+            // M3U-порядок: если в папке есть плейлист (.m3u/.m3u8), его позиция
+            // становится trackNumber трека. Перебивает тег файла (нужно для винил-
+            // рипов с нечисловыми TRACKNUMBER «A1»/«B2»). Применяется ДО sidecar —
+            // деднамеренная правка с Мака (sidecar.trackNumber) побеждает плейлист.
+            let playlistOrder: [String: Int]
+            if let cached = playlistByFolder[parent.path] {
+                playlistOrder = cached
+            } else {
+                let loaded = loadPlaylistOrder(inFolder: parent)
+                playlistByFolder[parent.path] = loaded
+                playlistOrder = loaded
+            }
+            if let position = playlistOrder[url.lastPathComponent.lowercased()] {
+                info.trackNumber = position
             }
 
             // Override тегов: любое непустое поле побеждает прочитанный тег.
@@ -96,6 +113,30 @@ public enum LibraryScanner {
         let url = folder.appendingPathComponent(AlbumSidecar.fileName)
         guard let data = try? Data(contentsOf: url) else { return nil }
         return try? JSONDecoder().decode(AlbumSidecar.self, from: data)
+    }
+
+    /// Читает плейлист (`.m3u`/`.m3u8`) из папки и возвращает карту
+    /// `имя файла (нижний регистр)` → `1-based позиция`. Несколько плейлистов —
+    /// берём первый по имени (детерминизм). Нет файла/не читается → пустая карта
+    /// (трекам ничего не проставляется, скан не падает).
+    private static func loadPlaylistOrder(inFolder folder: URL) -> [String: Int] {
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: folder, includingPropertiesForKeys: nil
+        ) else { return [:] }
+        let playlists = files
+            .filter { ["m3u", "m3u8"].contains($0.pathExtension.lowercased()) }
+            .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+        guard let url = playlists.first, let content = readText(url) else { return [:] }
+        return M3UPlaylist.order(from: content)
+    }
+
+    /// Текст файла в наиболее вероятной кодировке: UTF-8 (`.m3u8` по стандарту,
+    /// большинство `.m3u`), затем системная определялка, затем Latin-1 (старые `.m3u`).
+    private static func readText(_ url: URL) -> String? {
+        if let s = try? String(contentsOf: url, encoding: .utf8) { return s }
+        var used = String.Encoding.utf8
+        if let s = try? String(contentsOf: url, usedEncoding: &used) { return s }
+        return try? String(contentsOf: url, encoding: .isoLatin1)
     }
 
     private static func artworkFileURL(inFolder folder: URL) -> URL? {
