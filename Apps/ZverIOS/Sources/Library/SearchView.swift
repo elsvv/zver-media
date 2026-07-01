@@ -59,7 +59,7 @@ struct SearchView: View {
             }
             if !albums.isEmpty {
                 Section("Альбомы") {
-                    ForEach(albums, id: \.album) { group in
+                    ForEach(albums) { group in
                         NavigationLink {
                             AlbumDetailView(group: group, store: store, engine: engine)
                         } label: {
