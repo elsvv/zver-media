@@ -1,5 +1,6 @@
 import SwiftUI
 import UniformTypeIdentifiers
+import ZverMetadata
 import ZverTransport
 
 /// Mac-компаньон Zver Media.
@@ -9,6 +10,7 @@ import ZverTransport
 /// (сервер + Bonjour + pairing) — S3-9, здесь только каркас.
 @main
 struct ZverMacApp: App {
+    @NSApplicationDelegateAdaptor(ZverAppDelegate.self) private var appDelegate
     @StateObject private var queue: OutgoingQueue
     @StateObject private var dropController = DropController()
     /// Координатор сетевой раздачи (сервер + Bonjour + pairing). Создаётся поверх
@@ -23,6 +25,10 @@ struct ZverMacApp: App {
         let queue = OutgoingQueue()
         _queue = StateObject(wrappedValue: queue)
         _server = StateObject(wrappedValue: ServerCoordinator(queue: queue))
+        // Программный автосинк: после старта читаем ~/.zver-autoqueue (список папок-
+        // альбомов, по строке на путь) и ставим их в очередь без drag-drop —
+        // «агент кладёт список → музыка в очереди, на телефоне один тап Импорт».
+        ZverAppDelegate.onLaunch = { MacEnqueue.runStartupAutoqueue(queue: queue) }
     }
 
     var body: some Scene {
@@ -212,6 +218,50 @@ private struct MenuBarContent: View {
             NSApp.terminate(nil)
         }
         .keyboardShortcut("q")
+    }
+}
+
+/// Программная постановка папок-альбомов в очередь (без превью/drag-drop) —
+/// для автосинка агентом. Тот же путь, что и ручной enqueue: скан → черновик →
+/// манифест (хеширование вне главного потока) → очередь.
+enum MacEnqueue {
+    @MainActor
+    static func enqueueFolder(_ folder: URL, into queue: OutgoingQueue) async {
+        guard let infos = try? await LibraryScanner.scan(directory: folder), !infos.isEmpty else { return }
+        let draft = AlbumDraft.from(folder: folder, infos: infos)
+        let snapshot = draft.snapshot()
+        let album = await Task.detached(priority: .utility) { () -> ManifestAlbum? in
+            try? ManifestBuilder.buildAlbum(from: snapshot)
+        }.value
+        guard let album else { return }
+        // Идемпотентно: не дублируем альбом, уже стоящий в очереди (по albumId).
+        if !queue.albums.contains(where: { $0.id == album.id }) {
+            queue.enqueue(QueuedAlbum(manifestAlbum: album, sourceFolder: snapshot.sourceFolder))
+        }
+    }
+
+    /// Читает список папок из `~/.zver-autoqueue` (по строке на путь) и ставит их
+    /// в очередь по очереди. Nonisolated-обёртка, кидающая работу на `@MainActor`.
+    static func runStartupAutoqueue(queue: OutgoingQueue) {
+        Task { @MainActor in
+            let path = NSString(string: "~/.zver-autoqueue").expandingTildeInPath
+            guard let list = try? String(contentsOfFile: path, encoding: .utf8) else { return }
+            let folders = list.split(whereSeparator: \.isNewline)
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+            for p in folders {
+                await enqueueFolder(URL(fileURLWithPath: p), into: queue)
+            }
+        }
+    }
+}
+
+/// App-делегат: запускает автосинк после `applicationDidFinishLaunching` —
+/// надёжнее, чем `.task` окна у menu-bar-агента, чьё окно может быть закрыто.
+final class ZverAppDelegate: NSObject, NSApplicationDelegate {
+    nonisolated(unsafe) static var onLaunch: (() -> Void)?
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        ZverAppDelegate.onLaunch?()
     }
 }
 

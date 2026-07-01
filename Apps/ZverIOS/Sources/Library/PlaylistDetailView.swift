@@ -39,6 +39,16 @@ struct PlaylistDetailView: View {
                 }
                 .onMove(perform: move)
                 .onDelete(perform: delete)
+                // Освобождаем последний трек из-под мини-плеера: в `.plain`-списке
+                // нижний inset от ContentView `.safeAreaInset` до последнего ряда
+                // доходит не всегда (та же причина, что в AlbumDetailView). Ряд вне
+                // ForEach — не таскается и не удаляется в режиме правки.
+                if !tracks.isEmpty, engine.queue.current != nil {
+                    Color.clear
+                        .frame(height: MiniPlayerMetrics.approximateHeight)
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(Color.clear)
+                }
             }
         }
         .listStyle(.plain)

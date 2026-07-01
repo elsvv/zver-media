@@ -30,6 +30,9 @@ public struct TrackOverride: Codable, Sendable {
 public struct AlbumSidecar: Codable, Sendable {
     public var version: Int
     public var artworkFileName: String?
+    /// Описание альбома (аннотация/заметка), правится на Маке и показывается на
+    /// экране альбома. Опционально: у большинства sidecar его нет.
+    public var description: String?
     public var tracks: [String: TrackOverride]
 
     /// Имя sidecar-файла в папке альбома.
@@ -38,19 +41,21 @@ public struct AlbumSidecar: Codable, Sendable {
     public init(
         version: Int,
         artworkFileName: String? = nil,
+        description: String? = nil,
         tracks: [String: TrackOverride] = [:]
     ) {
         self.version = version
         self.artworkFileName = artworkFileName
+        self.description = description
         self.tracks = tracks
     }
 
     private enum CodingKeys: String, CodingKey {
-        case version, artworkFileName, tracks
+        case version, artworkFileName, description, tracks
     }
 
-    /// Кастомный декод: `artworkFileName` и `tracks` опциональны при чтении.
-    /// Синтезированный `init(from:)` НЕ применяет дефолты из memberwise-init,
+    /// Кастомный декод: `artworkFileName`, `description` и `tracks` опциональны при
+    /// чтении. Синтезированный `init(from:)` НЕ применяет дефолты из memberwise-init,
     /// поэтому sidecar без ключа `tracks` (например, правка только обложки —
     /// `{"version":1,"artworkFileName":"edited.jpg"}`) иначе не декодировался
     /// бы и молча отбрасывался вместе с обложкой.
@@ -59,6 +64,8 @@ public struct AlbumSidecar: Codable, Sendable {
         self.version = try container.decode(Int.self, forKey: .version)
         self.artworkFileName = try container.decodeIfPresent(
             String.self, forKey: .artworkFileName)
+        self.description = try container.decodeIfPresent(
+            String.self, forKey: .description)
         self.tracks = try container.decodeIfPresent(
             [String: TrackOverride].self, forKey: .tracks) ?? [:]
     }

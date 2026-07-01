@@ -8,7 +8,7 @@ struct SongsView: View {
     @ObservedObject var engine: PlayerEngine
 
     var body: some View {
-        List(store.albums, id: \.album) { group in
+        List(store.albums) { group in
             Section {
                 ForEach(Array(group.tracks.enumerated()), id: \.element.id) { index, track in
                     Button {

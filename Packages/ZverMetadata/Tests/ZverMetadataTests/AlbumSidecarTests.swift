@@ -79,11 +79,45 @@ import Foundation
     }
 
     @Test func decodesBareVersionOnly() throws {
-        // Ни tracks, ни artworkFileName — оба опциональны при чтении.
+        // Ни tracks, ни artworkFileName, ни description — все опциональны при чтении.
         let sidecar = try JSONDecoder().decode(
             AlbumSidecar.self, from: Data(#"{"version":2}"#.utf8))
         #expect(sidecar.version == 2)
         #expect(sidecar.artworkFileName == nil)
+        #expect(sidecar.description == nil)
         #expect(sidecar.tracks.isEmpty)
+    }
+
+    @Test func decodesDescriptionField() throws {
+        let json = """
+        {"version": 1, "description": "Легендарный альбом 2003 года."}
+        """
+        let sidecar = try JSONDecoder().decode(
+            AlbumSidecar.self, from: Data(json.utf8))
+        #expect(sidecar.description == "Легендарный альбом 2003 года.")
+        // description сам по себе не тянет за собой другие поля.
+        #expect(sidecar.artworkFileName == nil)
+        #expect(sidecar.tracks.isEmpty)
+    }
+
+    @Test func roundTripsWithDescription() throws {
+        let original = AlbumSidecar(
+            version: 1,
+            artworkFileName: "cover.jpg",
+            description: "Многострочное\nописание альбома.",
+            tracks: ["a.flac": TrackOverride(title: "T")])
+        let data = try JSONEncoder().encode(original)
+        let decoded = try JSONDecoder().decode(AlbumSidecar.self, from: data)
+        #expect(decoded.description == "Многострочное\nописание альбома.")
+        #expect(decoded.artworkFileName == "cover.jpg")
+        #expect(decoded.tracks["a.flac"]?.title == "T")
+    }
+
+    @Test func descriptionAbsentWhenNil() throws {
+        // Правка без описания round-trip'ится с description == nil.
+        let original = AlbumSidecar(version: 1, tracks: ["a.flac": TrackOverride(title: "T")])
+        let data = try JSONEncoder().encode(original)
+        let decoded = try JSONDecoder().decode(AlbumSidecar.self, from: data)
+        #expect(decoded.description == nil)
     }
 }

@@ -17,7 +17,7 @@ struct AlbumsGridView: View {
     var body: some View {
         ScrollView {
             LazyVGrid(columns: Self.columns, spacing: 20) {
-                ForEach(albums, id: \.album) { group in
+                ForEach(albums) { group in
                     NavigationLink {
                         AlbumDetailView(group: group, store: store, engine: engine)
                     } label: {
@@ -27,8 +27,22 @@ struct AlbumsGridView: View {
                 }
             }
             .padding(.horizontal, 16)
+            // Хвостовой отступ: последний ряд плиток не должен упираться в
+            // мини-плеер (он висит через .safeAreaInset у стека навигации).
+            .padding(.bottom, 12)
         }
         .navigationTitle(title)
+    }
+
+    /// Названия альбомов, встречающиеся более одного раза в этом списке: у таких
+    /// плиток показываем подсказку-качество, чтобы различать версии (оцифровки).
+    private var duplicatedTitles: Set<String> {
+        var seen: Set<String> = []
+        var dupes: Set<String> = []
+        for group in albums {
+            if !seen.insert(group.album).inserted { dupes.insert(group.album) }
+        }
+        return dupes
     }
 
     private func cell(for group: AlbumGroup) -> some View {
@@ -42,6 +56,14 @@ struct AlbumsGridView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
+            // Дубль названия = разные версии одного альбома: подсказка «24/96»
+            // (качество первого трека) позволяет отличить их в сетке.
+            if duplicatedTitles.contains(group.album), let first = group.tracks.first {
+                Text(TrackQuality.compact(for: first))
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            }
         }
     }
 }
