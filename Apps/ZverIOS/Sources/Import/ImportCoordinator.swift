@@ -114,20 +114,20 @@ final class ImportCoordinator: ObservableObject {
         defer { isRunning = false }
         phase = .running
 
+        // Список показываем СРАЗУ (все «ждут»), чтобы экран не был пустым, пока
+        // считаем локальные sha — на большой библиотеке это заметное время.
+        albums = manifest.albums.map { album in
+            AlbumImport(id: album.id, title: album.title,
+                        totalFiles: Self.fileCount(of: album), phase: .waiting)
+        }
+
         // Дельта-план: что докачать, какие альбомы уже целиком на месте.
         let local = await localShas()
         let plan = SyncPlanner.plan(manifest: manifest, localShasByPath: local)
 
-        // Заготавливаем состояние UI по всем альбомам манифеста.
-        albums = manifest.albums.map { album in
-            let total = Self.fileCount(of: album)
-            let isComplete = plan.alreadyComplete.contains(album.id)
-            return AlbumImport(
-                id: album.id,
-                title: album.title,
-                totalFiles: total,
-                phase: isComplete ? .finalizing : .waiting
-            )
+        // Полностью готовые альбомы сразу отмечаем финализацией.
+        for albumId in plan.alreadyComplete {
+            setPhase(.finalizing, for: albumId)
         }
 
         let fetchByAlbum = Dictionary(grouping: plan.toFetch, by: { $0.albumId })
@@ -166,6 +166,11 @@ final class ImportCoordinator: ObservableObject {
         let albumId = album.id
         let total = Self.fileCount(of: album)
 
+        // Устаревшие файлы (плоские — до реорганизации в CD-папки) убираем ДО
+        // загрузки: иначе на время импорта на диске держались бы обе копии (риск
+        // переполнения устройства с большой библиотекой).
+        engine.pruneStaleFiles(for: album)
+
         // Уже лежащие и сверенные файлы (не в плане) считаем готовыми для прогресса.
         let completedAlready = total - planned.count
         perFileProgress[albumId] = [:]
@@ -174,7 +179,6 @@ final class ImportCoordinator: ObservableObject {
             // Альбом уже целиком на месте: только sidecar + переход к confirm.
             setPhase(.finalizing, for: albumId)
             try engine.writeSidecar(for: album)
-            engine.pruneStaleFiles(for: album)
             return
         }
 
@@ -195,11 +199,9 @@ final class ImportCoordinator: ObservableObject {
             updateDownloadingPhase(albumId: albumId, completed: completedAlready, total: total)
         }
 
-        // Все файлы альбома разложены и сверены: материализуем правки в sidecar
-        // и убираем устаревшие файлы (напр. плоские до реорганизации в CD-папки).
+        // Все файлы альбома разложены и сверены: материализуем правки в sidecar.
         setPhase(.finalizing, for: albumId)
         try engine.writeSidecar(for: album)
-        engine.pruneStaleFiles(for: album)
     }
 
     /// Пересчитывает и публикует фазу `.downloading` по накопленному прогрессу.
