@@ -139,6 +139,48 @@ import Testing
         #expect(stored?.cloudSha == "deadbeef")
     }
 
+    // MARK: - Миграция v3 (discNumber)
+
+    @Test func migrationV3AddsDiscNumberColumn() throws {
+        let catalog = try Catalog.inMemory()
+        let columns = try catalog.dbQueue.read { db in
+            try db.columns(in: "track").map(\.name)
+        }
+        #expect(columns.contains("discNumber"))
+    }
+
+    @Test func insertFetchRoundtripPreservesDiscNumber() throws {
+        let catalog = try Catalog.inMemory()
+        let record = TrackRecord(
+            relativePath: "Mezzanine/CD2/01.flac",
+            title: "Metal Banshee",
+            album: "Mezzanine",
+            trackNumber: 1,
+            discNumber: 2,
+            duration: 300,
+            sampleRate: 44100,
+            addedAt: Date(timeIntervalSince1970: 1_750_000_000)
+        )
+        try catalog.dbQueue.write { db in try record.insert(db) }
+        let fetched = try catalog.dbQueue.read { db in
+            try TrackRecord.fetchOne(db, key: "Mezzanine/CD2/01.flac")
+        }
+        #expect(fetched == record)
+        #expect(fetched?.discNumber == 2)
+    }
+
+    @Test func trackRecordConversionCarriesDiscNumber() throws {
+        let track = Track(
+            url: URL(fileURLWithPath: "/docs/Mezzanine/CD2/01.flac"),
+            title: "Metal Banshee", album: "Mezzanine",
+            trackNumber: 1, discNumber: 2, duration: 300, sampleRate: 44100)
+        let record = TrackRecord(track: track, relativePath: "Mezzanine/CD2/01.flac",
+                                 artworkFilePath: nil)
+        #expect(record.discNumber == 2)
+        let back = record.track(documentsURL: URL(fileURLWithPath: "/docs"))
+        #expect(back.discNumber == 2)
+    }
+
     // MARK: - Roundtrip TrackRecord
 
     @Test func insertFetchRoundtripPreservesAllFields() throws {

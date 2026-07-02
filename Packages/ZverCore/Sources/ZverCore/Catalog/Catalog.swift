@@ -70,6 +70,15 @@ public final class Catalog: Sendable {
             }
         }
 
+        // v3: номер диска (много-дисковые альбомы). Аддитивна и идемпотентна —
+        // только ALTER TABLE ADD COLUMN. Существующие строки получают NULL
+        // (одно-дисковый), пока рескан не подхватит DISCNUMBER из тегов/sidecar.
+        migrator.registerMigration("v3") { db in
+            try db.alter(table: "track") { t in
+                t.add(column: "discNumber", .integer)
+            }
+        }
+
         return migrator
     }
 }

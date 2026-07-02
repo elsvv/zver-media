@@ -23,21 +23,40 @@ struct AlbumDetailView: View {
                     .listRowSeparator(.hidden)
                     .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 12, trailing: 16))
             }
-            Section {
-                ForEach(Array(group.tracks.enumerated()), id: \.element.id) { index, track in
-                    AlbumTrackRow(
-                        track: track,
-                        fallbackNumber: index + 1,
-                        store: store,
-                        onPlay: { play(at: index, track: track) }
-                    )
+            if group.hasMultipleDiscs {
+                // Много-дисковый альбом: каждый диск — своя секция с серым
+                // заголовком «Диск N» (как в Apple Music). Индекс запуска —
+                // глобальный (в group.tracks), номер в ряду — тег диска (1..N
+                // на каждом диске).
+                ForEach(discRowGroups) { section in
+                    Section {
+                        ForEach(Array(section.tracks.enumerated()), id: \.element.id) { local, track in
+                            trackRow(globalIndex: section.startIndex + local,
+                                     track: track,
+                                     fallback: local + 1)
+                        }
+                    } header: {
+                        Text("Диск \(section.number)")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            .textCase(nil)
+                    }
                 }
-                // Освобождаем последний трек из-под мини-плеера. Он висит через
-                // ContentView `.safeAreaInset(edge:.bottom)`, но в `.plain`-списке
-                // на протолкнутом экране нижний inset до последнего ряда доходит
-                // не всегда — явный прозрачный ряд гарантирует, что последний трек
-                // доскролливается выше панели. Ряд есть только когда панель видна.
-                if engine.queue.current != nil {
+            } else {
+                Section {
+                    ForEach(Array(group.tracks.enumerated()), id: \.element.id) { index, track in
+                        trackRow(globalIndex: index, track: track, fallback: index + 1)
+                    }
+                }
+            }
+
+            // Освобождаем последний трек из-под мини-плеера. Он висит через
+            // ContentView `.safeAreaInset(edge:.bottom)`, но в `.plain`-списке
+            // на протолкнутом экране нижний inset до последнего ряда доходит
+            // не всегда — явный прозрачный ряд гарантирует, что последний трек
+            // доскролливается выше панели. Ряд есть только когда панель видна.
+            if engine.queue.current != nil {
+                Section {
                     Color.clear
                         .frame(height: MiniPlayerMetrics.approximateHeight)
                         .listRowSeparator(.hidden)
@@ -50,6 +69,41 @@ struct AlbumDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { albumMenu }
         .task { await loadDescription() }
+    }
+
+    // MARK: - Список треков
+
+    /// Один диск для рендера: номер, глобальный индекс первого трека в
+    /// `group.tracks` (для запуска альбома с правильной позиции) и треки диска.
+    private struct DiscRowGroup: Identifiable {
+        let number: Int
+        let startIndex: Int
+        let tracks: [Track]
+        var id: Int { number }
+    }
+
+    /// Дисковые секции с проставленным глобальным стартовым индексом. Диски —
+    /// непрерывные отрезки уже отсортированного `group.tracks`, поэтому смещение
+    /// накапливаем по длине предыдущих.
+    private var discRowGroups: [DiscRowGroup] {
+        var result: [DiscRowGroup] = []
+        var offset = 0
+        for section in group.discSections {
+            result.append(DiscRowGroup(number: section.number,
+                                       startIndex: offset,
+                                       tracks: section.tracks))
+            offset += section.tracks.count
+        }
+        return result
+    }
+
+    private func trackRow(globalIndex: Int, track: Track, fallback: Int) -> some View {
+        AlbumTrackRow(
+            track: track,
+            fallbackNumber: fallback,
+            store: store,
+            onPlay: { play(at: globalIndex, track: track) }
+        )
     }
 
     // MARK: - Шапка

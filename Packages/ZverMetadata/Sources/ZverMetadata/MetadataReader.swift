@@ -6,6 +6,8 @@ public struct AudioFileInfo: Sendable {
     public var artist: String?
     public var album: String?
     public var trackNumber: Int?
+    /// Номер диска (1-based) из тега DISCNUMBER/disc. nil — одно-дисковый.
+    public var discNumber: Int?
     public var year: Int?
     public var duration: Double
     public var sampleRate: Double
@@ -68,6 +70,9 @@ public enum MetadataReader {
             artist: tags["ARTIST"],
             album: tags["ALBUM"],
             trackNumber: tags["TRACKNUMBER"].flatMap { Int($0.prefix(while: \.isNumber)) },
+            // Vorbis DISCNUMBER (FLAC/Ogg) или DISC; форма «1/2» и «01» → 1.
+            discNumber: (tags["DISCNUMBER"] ?? tags["DISC"])
+                .flatMap { Int($0.prefix(while: \.isNumber)) },
             year: tags["DATE"].flatMap { Int($0.prefix(4)) },
             duration: probed.duration,
             sampleRate: probed.sampleRate,

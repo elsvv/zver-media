@@ -73,6 +73,7 @@ public enum LibraryScanner {
                 if let al = override.album { info.album = al }
                 if let y = override.year { info.year = y }
                 if let n = override.trackNumber { info.trackNumber = n }
+                if let d = override.discNumber { info.discNumber = d }
             }
 
             if info.album == nil, parent.path != rootPath {

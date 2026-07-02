@@ -33,6 +33,7 @@ enum ManifestBuilder {
             var artist: String?
             var album: String?
             var trackNumber: Int?
+            var discNumber: Int?
             var year: Int?
             var duration: Double
             var sampleRate: Double
@@ -52,6 +53,7 @@ enum ManifestBuilder {
                 artist: track.artist.nilIfBlank,
                 album: track.album.nilIfBlank,
                 trackNumber: track.trackNumber,
+                discNumber: track.discNumber,
                 year: track.year,
                 duration: track.duration,
                 sampleRate: Int(track.sampleRate.rounded()),

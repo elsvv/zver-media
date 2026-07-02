@@ -76,8 +76,8 @@ final class AlbumDraft: ObservableObject, Identifiable {
     /// трека (сканер уже нашёл `folder.jpg`/sidecar). Файлы не читаются повторно.
     static func from(folder: URL, infos: [AudioFileInfo]) -> AlbumDraft {
         let sortedInfos = infos.sorted {
-            ($0.trackNumber ?? Int.max, $0.url.lastPathComponent)
-                < ($1.trackNumber ?? Int.max, $1.url.lastPathComponent)
+            ($0.discNumber ?? 1, $0.trackNumber ?? Int.max, $0.url.lastPathComponent)
+                < ($1.discNumber ?? 1, $1.trackNumber ?? Int.max, $1.url.lastPathComponent)
         }
 
         let albumTitle = sortedInfos.first?.album
@@ -128,6 +128,9 @@ struct TrackDraft: Identifiable, Sendable {
     let duration: Double
     let sampleRate: Double
     let bitDepth: Int?
+    /// Номер диска из тега (read-only): проносится в манифест/sidecar как есть,
+    /// чтобы телефон делил альбом на «Диск N». Пока не правится в превью.
+    let discNumber: Int?
 
     /// Имя файла в папке альбома (`fileName` манифеста).
     var fileName: String { fileURL.lastPathComponent }
@@ -149,5 +152,6 @@ struct TrackDraft: Identifiable, Sendable {
         self.duration = info.duration
         self.sampleRate = info.sampleRate
         self.bitDepth = info.bitDepth
+        self.discNumber = info.discNumber
     }
 }

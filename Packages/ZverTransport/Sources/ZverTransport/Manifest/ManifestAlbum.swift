@@ -34,6 +34,9 @@ public struct ManifestTrack: Codable, Equatable, Sendable {
     public var artist: String?
     public var album: String?
     public var trackNumber: Int?
+    /// Номер диска (1-based) для много-дисковых альбомов. Опционально:
+    /// старые манифесты без ключа декодируются в nil (одно-дисковый).
+    public var discNumber: Int?
     public var year: Int?
     public var duration: Double
     public var sampleRate: Int
@@ -47,6 +50,7 @@ public struct ManifestTrack: Codable, Equatable, Sendable {
                 artist: String? = nil,
                 album: String? = nil,
                 trackNumber: Int? = nil,
+                discNumber: Int? = nil,
                 year: Int? = nil,
                 duration: Double,
                 sampleRate: Int,
@@ -59,6 +63,7 @@ public struct ManifestTrack: Codable, Equatable, Sendable {
         self.artist = artist
         self.album = album
         self.trackNumber = trackNumber
+        self.discNumber = discNumber
         self.year = year
         self.duration = duration
         self.sampleRate = sampleRate
