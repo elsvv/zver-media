@@ -376,6 +376,31 @@ import Testing
 
     // MARK: - Связи
 
+    @Test func deleteTracksRemovesOnlyGivenRows() throws {
+        let catalog = try Catalog.inMemory()
+        let store = CatalogStore(catalog: catalog)
+        try catalog.dbQueue.write { db in
+            try TrackRecord(relativePath: "A/CD1/01.flac", title: "x", duration: 1, sampleRate: 44100).insert(db)
+            try TrackRecord(relativePath: "A/CD1/02.flac", title: "y", duration: 1, sampleRate: 44100).insert(db)
+            try TrackRecord(relativePath: "B/01.flac", title: "z", duration: 1, sampleRate: 44100).insert(db)
+        }
+        try store.deleteTracks(relativePaths: ["A/CD1/01.flac", "A/CD1/02.flac"])
+        let count = try catalog.dbQueue.read { db in try TrackRecord.fetchCount(db) }
+        #expect(count == 1)
+        let survivor = try catalog.dbQueue.read { db in try TrackRecord.fetchOne(db, key: "B/01.flac") }
+        #expect(survivor != nil)
+    }
+
+    @Test func deleteTracksEmptyIsNoOp() throws {
+        let catalog = try Catalog.inMemory()
+        let store = CatalogStore(catalog: catalog)
+        try catalog.dbQueue.write { db in
+            try TrackRecord(relativePath: "a.flac", title: "x", duration: 1, sampleRate: 44100).insert(db)
+        }
+        try store.deleteTracks(relativePaths: [])
+        #expect(try catalog.dbQueue.read { db in try TrackRecord.fetchCount(db) } == 1)
+    }
+
     @Test func deletingTrackCascadesIntoPlaylistTrack() throws {
         let catalog = try Catalog.inMemory()
         try catalog.dbQueue.write { db in

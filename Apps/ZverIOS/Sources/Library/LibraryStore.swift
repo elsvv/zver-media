@@ -169,6 +169,152 @@ final class LibraryStore: ObservableObject {
         return count
     }
 
+    // MARK: - Управление альбомами (удаление/выгрузка/переименование)
+    //
+    // Все методы принимают СПИСОК альбомов (один — контекст-меню, несколько —
+    // мультивыбор) и делают ОДИН republish в конце. Опасные — под confirm в UI.
+
+    /// «Убрать с устройства»: забэкапленные треки выгружаются в облако (локальные
+    /// файлы удаляются, альбом становится `remote`/серым; обложка/плейлист остаются
+    /// для показа). Незабэкапленные треки не трогает (иначе потеряли бы единственную
+    /// копию — для них в UI показывается «Удалить»).
+    func removeFromDevice(_ groups: [AlbumGroup]) async {
+        for group in groups {
+            for track in group.tracks where track.fileState == .backedUp {
+                _ = await backupService?.offload(track: track)
+            }
+        }
+        await refresh()
+    }
+
+    /// «Скачать»: возвращает облачные (`remote`) треки альбомов на устройство.
+    func downloadAlbums(_ groups: [AlbumGroup]) async {
+        for group in groups {
+            for track in group.tracks where track.fileState == .remote {
+                _ = await backupService?.download(track: track)
+            }
+        }
+        await refresh()
+    }
+
+    /// «Бэкап в облако»: делегирует общий автобэкап ожидающих `local`-треков.
+    func backupAlbums(_ groups: [AlbumGroup]) async { await backupAll() }
+
+    /// Полное локальное удаление: сносит папки альбомов (аудио, обложка, плейлист,
+    /// sidecar) и строки каталога. Облачные копии не трогает.
+    func deleteLocally(_ groups: [AlbumGroup]) async {
+        for group in groups {
+            await removeAlbumFolder(group)
+            await removeCatalogRows(group)
+        }
+        await refresh()
+    }
+
+    /// «Удалить из облака»: удаляет облачные копии. Локальные файлы остаются —
+    /// треки снова становятся `local` (строки удаляются, рескан подхватывает);
+    /// облачные-только треки исчезают.
+    func deleteFromCloud(_ groups: [AlbumGroup]) async {
+        for group in groups {
+            await deleteCloudCopies(group)
+            await removeCatalogRows(group)
+        }
+        await refresh()
+    }
+
+    /// «Удалить везде»: облачные копии + папки альбомов + строки каталога.
+    func deleteEverywhere(_ groups: [AlbumGroup]) async {
+        for group in groups {
+            await deleteCloudCopies(group)
+            await removeAlbumFolder(group)
+            await removeCatalogRows(group)
+        }
+        await refresh()
+    }
+
+    /// Переименование альбома: пишет per-track override тега ALBUM в sidecar
+    /// (сливая с существующим), рескан меняет отображаемое название. Идентичность
+    /// (папка) не меняется.
+    func renameAlbum(_ group: AlbumGroup, to newTitle: String) async {
+        let title = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty,
+              let folder = Self.albumFolderURL(for: group, documentsURL: documentsURL)
+        else { return }
+        let relPaths = group.tracks.map { Self.relativePathWithinAlbum($0.url, folder: folder) }
+        await Task.detached(priority: .utility) {
+            Self.writeAlbumRename(folder: folder, trackRelPaths: relPaths, title: title)
+        }.value
+        await refresh()
+    }
+
+    private func deleteCloudCopies(_ group: AlbumGroup) async {
+        for track in group.tracks where track.fileState == .backedUp || track.fileState == .remote {
+            _ = await backupService?.deleteFromCloud(track: track)
+        }
+    }
+
+    /// Сносит папку альбома целиком (если она внутри Documents); иначе — только
+    /// файлы треков. Работа с ФС — вне главного потока.
+    private func removeAlbumFolder(_ group: AlbumGroup) async {
+        if let folder = Self.albumFolderURL(for: group, documentsURL: documentsURL) {
+            await Task.detached(priority: .utility) {
+                try? FileManager.default.removeItem(at: folder)
+            }.value
+        } else {
+            let urls = group.tracks.map(\.url)
+            await Task.detached(priority: .utility) {
+                for url in urls { try? FileManager.default.removeItem(at: url) }
+            }.value
+        }
+    }
+
+    private func removeCatalogRows(_ group: AlbumGroup) async {
+        let paths = group.tracks.compactMap { Self.relativePath(of: $0.url, from: documentsURL) }
+        let store = catalogStore
+        await Task.detached(priority: .utility) {
+            try? store.deleteTracks(relativePaths: paths)
+        }.value
+    }
+
+    /// Папка альбома (`group.id`), только если это реальная директория ВНУТРИ
+    /// Documents (защита от сноса произвольного пути). Иначе nil.
+    private nonisolated static func albumFolderURL(for group: AlbumGroup, documentsURL: URL) -> URL? {
+        guard group.id != AlbumGroup.noAlbumTitle else { return nil }
+        let url = URL(fileURLWithPath: group.id).standardizedFileURL
+        let base = documentsURL.standardizedFileURL.path
+        guard url.path.hasPrefix(base + "/") else { return nil }
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir),
+              isDir.boolValue else { return nil }
+        return url
+    }
+
+    private nonisolated static func relativePathWithinAlbum(_ url: URL, folder: URL) -> String {
+        let base = folder.standardizedFileURL.path
+        let path = url.standardizedFileURL.path
+        return path.hasPrefix(base + "/") ? String(path.dropFirst(base.count + 1)) : url.lastPathComponent
+    }
+
+    private nonisolated static func writeAlbumRename(folder: URL, trackRelPaths: [String], title: String) {
+        let sidecarURL = folder.appendingPathComponent(AlbumSidecar.fileName)
+        var sidecar: AlbumSidecar
+        if let data = try? Data(contentsOf: sidecarURL),
+           let existing = try? JSONDecoder().decode(AlbumSidecar.self, from: data) {
+            sidecar = existing
+        } else {
+            sidecar = AlbumSidecar(version: 1)
+        }
+        for rel in trackRelPaths {
+            var override = sidecar.tracks[rel] ?? TrackOverride()
+            override.album = title
+            sidecar.tracks[rel] = override
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        if let data = try? encoder.encode(sidecar) {
+            try? data.write(to: sidecarURL, options: .atomic)
+        }
+    }
+
     // MARK: - Плейлисты
 
     /// Перечитывает плейлисты из каталога и публикует список.
