@@ -26,9 +26,13 @@ final class AlbumDraft: ObservableObject, Identifiable {
     @Published var artist: String
     @Published var year: String
 
-    /// Имя файла обложки в `sourceFolder` (например `folder.jpg`), если найдена
-    /// или выбрана. nil — обложки нет. Сам файл не копируется/не правится здесь.
+    /// Имя файла обложки ОТНОСИТЕЛЬНО `sourceFolder` (например `cover.jpg`), если
+    /// найдена или выбрана. nil — обложки нет. Сам файл не копируется/не правится.
     @Published var artworkFileName: String?
+
+    /// Имя файла плейлиста в корне альбома (`playlist.m3u8`/`.m3u`), если есть. Едет
+    /// на телефон как файл-компаньон и задаёт деление на диски. nil — плейлиста нет.
+    @Published var playlistFileName: String?
 
     // MARK: Per-track (правится в превью)
 
@@ -39,12 +43,14 @@ final class AlbumDraft: ObservableObject, Identifiable {
          artist: String,
          year: String,
          artworkFileName: String?,
+         playlistFileName: String? = nil,
          tracks: [TrackDraft]) {
         self.sourceFolder = sourceFolder
         self.title = title
         self.artist = artist
         self.year = year
         self.artworkFileName = artworkFileName
+        self.playlistFileName = playlistFileName
         self.tracks = tracks
     }
 
@@ -84,10 +90,18 @@ final class AlbumDraft: ObservableObject, Identifiable {
             ?? folder.lastPathComponent
         let albumArtist = mostCommon(sortedInfos.compactMap(\.artist)) ?? ""
         let albumYear = sortedInfos.compactMap(\.year).first
-        let artworkFileURL = sortedInfos.compactMap(\.artworkFileURL).first
-        let artworkFileName = artworkFileURL?.lastPathComponent
 
-        let trackDrafts = sortedInfos.map { TrackDraft(info: $0) }
+        // Обложку и плейлист берём из КОРНЯ альбома (дропнутой папки), а не из
+        // подпапок-дисков: у много-дискового рипа cover.jpg/playlist.m3u8 лежат
+        // сверху. Фоллбэк обложки — на найденную сканером у трека (плоский альбом).
+        let rootCover = coverFileName(inRoot: folder)
+        let artworkFileName = rootCover
+            ?? sortedInfos.compactMap(\.artworkFileURL).first.map {
+                relativePath(of: $0, under: folder)
+            }
+        let playlistFileName = playlistFileName(inRoot: folder)
+
+        let trackDrafts = sortedInfos.map { TrackDraft(info: $0, albumRoot: folder) }
 
         return AlbumDraft(
             sourceFolder: folder,
@@ -95,8 +109,52 @@ final class AlbumDraft: ObservableObject, Identifiable {
             artist: albumArtist,
             year: albumYear.map(String.init) ?? "",
             artworkFileName: artworkFileName,
+            playlistFileName: playlistFileName,
             tracks: trackDrafts
         )
+    }
+
+    /// Путь `url` относительно корня альбома (`CD1/01 - x.flac`); если файл не под
+    /// корнем — просто его имя. `nonisolated`: чистая функция, зовётся из
+    /// `TrackDraft.init` (не на MainActor).
+    nonisolated static func relativePath(of url: URL, under root: URL) -> String {
+        let rootPath = root.standardizedFileURL.path
+        let path = url.standardizedFileURL.path
+        if path.hasPrefix(rootPath + "/") {
+            return String(path.dropFirst(rootPath.count + 1))
+        }
+        return url.lastPathComponent
+    }
+
+    private static let coverNames = ["cover", "folder", "front", "front cover", "albumart"]
+    private static let imageExtensions: Set<String> = ["jpg", "jpeg", "png", "webp"]
+
+    /// Обложка в корне альбома: файл `cover/folder/front…` (jpg/png/webp) в верхнем
+    /// уровне папки. Имя (относительно корня) или nil.
+    private static func coverFileName(inRoot root: URL) -> String? {
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: root, includingPropertiesForKeys: nil) else { return nil }
+        let images = files.filter { imageExtensions.contains($0.pathExtension.lowercased()) }
+        for name in coverNames {
+            if let match = images.first(where: {
+                $0.deletingPathExtension().lastPathComponent.lowercased() == name
+            }) {
+                return match.lastPathComponent
+            }
+        }
+        return images.first?.lastPathComponent
+    }
+
+    /// Плейлист (`.m3u8`/`.m3u`) в корне альбома. Имя или nil. При нескольких —
+    /// первый по имени (детерминизм).
+    private static func playlistFileName(inRoot root: URL) -> String? {
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: root, includingPropertiesForKeys: nil) else { return nil }
+        return files
+            .filter { ["m3u", "m3u8"].contains($0.pathExtension.lowercased()) }
+            .map(\.lastPathComponent)
+            .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+            .first
     }
 
     /// Наиболее частое значение (мода) для вывода album-артиста из тегов треков.
@@ -131,8 +189,12 @@ struct TrackDraft: Identifiable, Sendable {
     /// Номер диска из тега (read-only): проносится в манифест/sidecar как есть,
     /// чтобы телефон делил альбом на «Диск N». Пока не правится в превью.
     let discNumber: Int?
+    /// Путь файла ОТНОСИТЕЛЬНО корня альбома (`CD1/01 - x.flac` для дисков-подпапок,
+    /// иначе просто имя файла). Именно он едет в манифест как `fileName`, чтобы
+    /// телефон воссоздал структуру папок один-в-один.
+    let relativePath: String
 
-    /// Имя файла в папке альбома (`fileName` манифеста).
+    /// Имя файла в папке альбома (последний компонент — для отображения).
     var fileName: String { fileURL.lastPathComponent }
 
     /// Расширение файла в нижнем регистре (`fileExtension` манифеста).
@@ -144,7 +206,7 @@ struct TrackDraft: Identifiable, Sendable {
         return trimmed.isEmpty ? nil : Int(trimmed)
     }
 
-    init(info: AudioFileInfo) {
+    init(info: AudioFileInfo, albumRoot: URL) {
         self.fileURL = info.url
         self.title = info.title
         self.artist = info.artist ?? ""
@@ -153,5 +215,6 @@ struct TrackDraft: Identifiable, Sendable {
         self.sampleRate = info.sampleRate
         self.bitDepth = info.bitDepth
         self.discNumber = info.discNumber
+        self.relativePath = AlbumDraft.relativePath(of: info.url, under: albumRoot)
     }
 }

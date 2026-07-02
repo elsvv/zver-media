@@ -11,6 +11,9 @@ public struct TrackOverride: Codable, Sendable {
     /// Явный номер диска, заданный на Маке. Побеждает тег DISCNUMBER файла —
     /// нужно, когда рип не содержит дисковых тегов, а альбом много-дисковый.
     public var discNumber: Int?
+    /// Явная метка диска (`CD1`/`Side A`), заданная на Маке. Обычно диск задаёт
+    /// плейлист/папка; это точечный override.
+    public var discLabel: String?
 
     public init(
         title: String? = nil,
@@ -18,7 +21,8 @@ public struct TrackOverride: Codable, Sendable {
         album: String? = nil,
         year: Int? = nil,
         trackNumber: Int? = nil,
-        discNumber: Int? = nil
+        discNumber: Int? = nil,
+        discLabel: String? = nil
     ) {
         self.title = title
         self.artist = artist
@@ -26,6 +30,7 @@ public struct TrackOverride: Codable, Sendable {
         self.year = year
         self.trackNumber = trackNumber
         self.discNumber = discNumber
+        self.discLabel = discLabel
     }
 }
 

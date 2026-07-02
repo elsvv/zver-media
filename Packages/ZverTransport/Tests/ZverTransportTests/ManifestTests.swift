@@ -155,6 +155,33 @@ import Foundation
         #expect(decoded.trackNumber == nil)
     }
 
+    @Test func playlistCompanionRoundTrips() throws {
+        let album = ManifestAlbum(
+            id: "T", title: "T",
+            playlist: ManifestFile(fileName: "playlist.m3u8", sha256: "pl", fileSize: 42),
+            tracks: [])
+        let data = try JSONEncoder().encode(album)
+        let decoded = try JSONDecoder().decode(ManifestAlbum.self, from: data)
+        #expect(decoded.playlist == ManifestFile(fileName: "playlist.m3u8", sha256: "pl", fileSize: 42))
+    }
+
+    @Test func oldAlbumWithoutPlaylistDecodesAsNil() throws {
+        // Обратная совместимость: манифест до фичи плейлиста-компаньона.
+        let json = #"{"id":"A","title":"B","tracks":[]}"#
+        let decoded = try JSONDecoder().decode(ManifestAlbum.self, from: Data(json.utf8))
+        #expect(decoded.playlist == nil)
+        #expect(decoded.artwork == nil)
+    }
+
+    @Test func trackFileNameCarriesRelativePath() throws {
+        // fileName может нести относительный путь диска — round-trip как строка.
+        let t = ManifestTrack(
+            fileName: "CD1/01 - Overcome.flac", title: "x", duration: 1,
+            sampleRate: 44100, fileSize: 1, sha256: "s", fileExtension: "flac")
+        let d = try JSONDecoder().decode(ManifestTrack.self, from: try JSONEncoder().encode(t))
+        #expect(d.fileName == "CD1/01 - Overcome.flac")
+    }
+
     @Test func optionalTrackFieldsRoundTripAsNil() throws {
         let track = ManifestTrack(
             fileName: "x.flac", title: "X", artist: nil, album: nil,

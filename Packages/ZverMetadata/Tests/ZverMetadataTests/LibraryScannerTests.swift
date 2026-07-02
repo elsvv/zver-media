@@ -172,6 +172,73 @@ import Foundation
         #expect(infos.first?.trackNumber == 7)
     }
 
+    @Test func rootPlaylistDefinesDiscsAcrossSubfolders() async throws {
+        // Структура рипа: <корень>/{CD1,CD2}/*.flac + playlist.m3u8 + cover.jpg.
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        let root = tmp.appendingPathComponent("Maxinquaye")
+        let cd1 = root.appendingPathComponent("CD1")
+        let cd2 = root.appendingPathComponent("CD2")
+        try FileManager.default.createDirectory(at: cd1, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: cd2, withIntermediateDirectories: true)
+        // notags.flac — без встроенной обложки, чтобы проверить обложку из корня.
+        let fx = fixture("notags.flac")
+        try FileManager.default.copyItem(at: fx, to: cd1.appendingPathComponent("a.flac"))
+        try FileManager.default.copyItem(at: fx, to: cd1.appendingPathComponent("b.flac"))
+        try FileManager.default.copyItem(at: fx, to: cd2.appendingPathComponent("c.flac"))
+        try Data([0xFF, 0xD8, 0xFF]).write(to: root.appendingPathComponent("cover.jpg"))
+        try Data("CD1/a.flac\nCD1/b.flac\nCD2/c.flac\n".utf8)
+            .write(to: root.appendingPathComponent("playlist.m3u8"))
+
+        let infos = try await LibraryScanner.scan(directory: tmp)
+        func info(_ name: String) throws -> AudioFileInfo {
+            try #require(infos.first { $0.url.lastPathComponent == name })
+        }
+        #expect(infos.count == 3)
+
+        let a = try info("a.flac")
+        #expect(a.discLabel == "CD1")
+        #expect(a.discNumber == 1)
+        #expect(a.trackNumber == 1)
+        // Нет тега альбома → имя КОРНЯ (не подпапки-диска).
+        #expect(a.album == "Maxinquaye")
+        // Обложка из корня доезжает до треков в подпапках.
+        #expect(a.artworkFileURL?.lastPathComponent == "cover.jpg")
+
+        let b = try info("b.flac")
+        #expect(b.discLabel == "CD1")
+        #expect(b.trackNumber == 2)      // номер внутри диска
+
+        let c = try info("c.flac")
+        #expect(c.discLabel == "CD2")
+        #expect(c.discNumber == 2)
+        #expect(c.trackNumber == 1)      // диск 2 нумерует с 1
+        #expect(c.artworkFileURL?.lastPathComponent == "cover.jpg")
+    }
+
+    @Test func subfolderDiscsWithoutPlaylistUseFolderNameAsLabel() async throws {
+        // Подпапки-диски без плейлиста: метка = имя подпапки, порядок — натуральный.
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        let root = tmp.appendingPathComponent("Album")
+        let cd1 = root.appendingPathComponent("CD1")
+        let cd2 = root.appendingPathComponent("CD2")
+        try FileManager.default.createDirectory(at: cd1, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: cd2, withIntermediateDirectories: true)
+        try Data([0xFF, 0xD8, 0xFF]).write(to: root.appendingPathComponent("cover.jpg"))
+        let fx = fixture("notags.flac")
+        try FileManager.default.copyItem(at: fx, to: cd1.appendingPathComponent("x.flac"))
+        try FileManager.default.copyItem(at: fx, to: cd2.appendingPathComponent("y.flac"))
+
+        let infos = try await LibraryScanner.scan(directory: tmp)
+        let x = try #require(infos.first { $0.url.lastPathComponent == "x.flac" })
+        let y = try #require(infos.first { $0.url.lastPathComponent == "y.flac" })
+        #expect(x.discLabel == "CD1")
+        #expect(x.discNumber == 1)
+        #expect(y.discLabel == "CD2")
+        #expect(y.discNumber == 2)
+    }
+
     @Test func sidecarDiscNumberOverridesTag() async throws {
         // Рип без DISCNUMBER, но альбом много-дисковый: правка с Мака задаёт диск.
         let tmp = FileManager.default.temporaryDirectory

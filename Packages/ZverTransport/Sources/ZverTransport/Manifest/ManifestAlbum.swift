@@ -9,6 +9,10 @@ public struct ManifestAlbum: Codable, Equatable, Sendable {
     public var artist: String?
     public var year: Int?
     public var artwork: ManifestArtwork?
+    /// Плейлист-компаньон в корне альбома (`playlist.m3u8`), задающий деление на
+    /// диски/стороны и порядок. Опционален: у одно-дисковых альбомов его нет.
+    /// Старые манифесты без ключа декодируются в nil.
+    public var playlist: ManifestFile?
     public var tracks: [ManifestTrack]
 
     public init(id: String,
@@ -16,12 +20,14 @@ public struct ManifestAlbum: Codable, Equatable, Sendable {
                 artist: String? = nil,
                 year: Int? = nil,
                 artwork: ManifestArtwork? = nil,
+                playlist: ManifestFile? = nil,
                 tracks: [ManifestTrack]) {
         self.id = id
         self.title = title
         self.artist = artist
         self.year = year
         self.artwork = artwork
+        self.playlist = playlist
         self.tracks = tracks
     }
 }
@@ -74,8 +80,9 @@ public struct ManifestTrack: Codable, Equatable, Sendable {
     }
 }
 
-/// Обложка альбома как отдельный раздаваемый файл (например `folder.jpg`).
-public struct ManifestArtwork: Codable, Equatable, Sendable {
+/// Раздаваемый файл-компаньон альбома (обложка `folder.jpg`, плейлист
+/// `playlist.m3u8`): имя (относительно корня альбома) + sha256 + размер.
+public struct ManifestFile: Codable, Equatable, Sendable {
     public var fileName: String
     public var sha256: String
     public var fileSize: Int
@@ -86,3 +93,7 @@ public struct ManifestArtwork: Codable, Equatable, Sendable {
         self.fileSize = fileSize
     }
 }
+
+/// Обложка альбома — частный случай файла-компаньона. Псевдоним ради совместимости
+/// исходников; на wire это тот же объект `{fileName, sha256, fileSize}`.
+public typealias ManifestArtwork = ManifestFile

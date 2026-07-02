@@ -13,122 +13,205 @@ public enum LibraryScanner {
         "albumartsmall", "album", "art", "artwork",
     ]
     private static let artworkExtensions: Set<String> = ["jpg", "jpeg", "png", "webp"]
+    private static let playlistExtensions: Set<String> = ["m3u", "m3u8"]
 
     /// Рекурсивно обходит директорию, читает метаданные всех аудиофайлов.
-    /// Не-аудио игнорируется, битые аудиофайлы пропускаются.
-    /// У файлов без тега ALBUM, лежащих не в корне скана, альбомом становится
-    /// имя непосредственной родительской папки.
-    /// У файлов без встроенной обложки artworkFileURL указывает на файл
-    /// cover/folder/front/albumart (jpg/jpeg/png) из папки трека, если есть.
-    /// Если в папке есть валидный sidecar (`album.zvermeta.json`), его правки
-    /// тегов накладываются поверх прочитанных (override побеждает тег), а
-    /// `artworkFileName` из sidecar выставляет artworkFileURL независимо от
-    /// встроенной обложки. Битый/нечитаемый sidecar игнорируется.
-    /// Результат отсортирован по пути файла.
     ///
-    /// Бросает, если корневую директорию невозможно перечислить
-    /// (отсутствует/нечитаема): такой сбой — не «пустая библиотека»,
-    /// вызывающий код не должен принимать его за реальный результат.
+    /// Диски/стороны: если у альбома есть плейлист (`playlist.m3u8`) в КОРНЕ, он
+    /// задаёт деление на диски (метка = папка `CD1`/`Side A`, порядок = из
+    /// плейлиста) и перебивает теги. Если плейлиста нет, но треки лежат в
+    /// подпапках корня — метка диска = имя подпапки. Иначе — тег `DISCNUMBER`
+    /// (метка отсутствует → «Диск N»). Корень альбома — ближайшая папка-предок с
+    /// плейлистом или обложкой; так папки-диски `CD1/CD2` остаются ОДНИМ альбомом.
+    ///
+    /// У файлов без тега ALBUM альбомом становится имя папки-КОРНЯ (не подпапки-
+    /// диска), кроме файлов в самом корне скана. Обложка/плейлист/sidecar читаются
+    /// из корня альбома. Правки sidecar (ключ — относительный путь внутри альбома)
+    /// накладываются поверх всего. Результат отсортирован по пути файла.
+    ///
+    /// Бросает, если корневую директорию невозможно перечислить.
     public static func scan(directory: URL) async throws -> [AudioFileInfo] {
         let urls = try audioURLs(in: directory).sorted { $0.path < $1.path }
-        let rootPath = directory.standardizedFileURL.path
+        let scanRoot = directory.standardizedFileURL
         var infos: [AudioFileInfo] = []
-        var artworkByFolder: [String: URL?] = [:]
-        var sidecarByFolder: [String: AlbumSidecar?] = [:]
-        var playlistByFolder: [String: [String: Int]] = [:]
+
+        // Кэши: факты о папках (для определения корня) и инфо корня альбома.
+        var folderFactsCache: [String: FolderFacts] = [:]
+        var rootAlbumCache: [String: RootAlbum] = [:]
+        func facts(_ folder: URL) -> FolderFacts {
+            if let cached = folderFactsCache[folder.path] { return cached }
+            let f = folderFacts(inFolder: folder)
+            folderFactsCache[folder.path] = f
+            return f
+        }
+        func rootAlbum(_ root: URL) -> RootAlbum {
+            if let cached = rootAlbumCache[root.path] { return cached }
+            let a = loadRootAlbum(root: root)
+            rootAlbumCache[root.path] = a
+            return a
+        }
+
         for url in urls {
             guard var info = try? await MetadataReader.read(url: url) else { continue }
             let parent = url.deletingLastPathComponent().standardizedFileURL
+            let root = albumRoot(for: url, scanRoot: scanRoot, facts: facts)
+            let album = rootAlbum(root)
+            let relPath = relativePath(of: url, under: root)
 
-            // Sidecar читаем один раз на папку (как и обложку).
-            let sidecar: AlbumSidecar?
-            if let cached = sidecarByFolder[parent.path] {
-                sidecar = cached
-            } else {
-                let loaded = loadSidecar(inFolder: parent)
-                sidecarByFolder[parent.path] = loaded
-                sidecar = loaded
+            // Диск/порядок: плейлист → подпапка → тег DISCNUMBER (уже в info).
+            if let disc = album.discMap[relPath.lowercased()] {
+                info.discLabel = disc.discLabel
+                info.discNumber = disc.discOrdinal
+                info.trackNumber = disc.position   // номер внутри диска
+            } else if parent.path != root.path, let sub = firstPathComponent(relPath) {
+                info.discLabel = sub
+                info.discNumber = album.subfolderOrdinal[sub.lowercased()]
+                // trackNumber остаётся из тега файла
             }
 
-            // M3U-порядок: если в папке есть плейлист (.m3u/.m3u8), его позиция
-            // становится trackNumber трека. Перебивает тег файла (нужно для винил-
-            // рипов с нечисловыми TRACKNUMBER «A1»/«B2»). Применяется ДО sidecar —
-            // деднамеренная правка с Мака (sidecar.trackNumber) побеждает плейлист.
-            let playlistOrder: [String: Int]
-            if let cached = playlistByFolder[parent.path] {
-                playlistOrder = cached
-            } else {
-                let loaded = loadPlaylistOrder(inFolder: parent)
-                playlistByFolder[parent.path] = loaded
-                playlistOrder = loaded
-            }
-            if let position = playlistOrder[url.lastPathComponent.lowercased()] {
-                info.trackNumber = position
+            // Нет тега альбома → имя папки-КОРНЯ (кроме файлов в корне скана).
+            if info.album == nil, root.path != scanRoot.path {
+                info.album = root.lastPathComponent
             }
 
-            // Override тегов: любое непустое поле побеждает прочитанный тег.
-            if let override = sidecar?.tracks[url.lastPathComponent] {
+            // Override тегов из sidecar. Ключ — относительный путь внутри альбома
+            // (`CD1/01.flac`); фоллбэк на имя файла — для старых плоских sidecar.
+            // Любое непустое поле побеждает прочитанное выше (в т.ч. плейлист).
+            if let override = album.sidecar?.tracks[relPath]
+                ?? album.sidecar?.tracks[url.lastPathComponent] {
                 if let t = override.title { info.title = t }
                 if let a = override.artist { info.artist = a }
                 if let al = override.album { info.album = al }
                 if let y = override.year { info.year = y }
                 if let n = override.trackNumber { info.trackNumber = n }
                 if let d = override.discNumber { info.discNumber = d }
+                if let dl = override.discLabel { info.discLabel = dl }
             }
 
-            if info.album == nil, parent.path != rootPath {
-                info.album = parent.lastPathComponent
-            }
-
-            // artworkFileName из sidecar побеждает встроенную обложку: сканер
-            // выставляет artworkFileURL даже при наличии встроенной обложки
-            // (artworkData != nil), отдавая показу оба источника.
-            // TODO(S3-11): приоритет ПОКАЗА над embedded — за стороной iOS.
-            // Сейчас ArtworkLoader.load (Apps/ZverIOS/Sources/Player/) сначала
-            // отдаёт встроенную artworkData и только при её отсутствии падает на
-            // artworkFileURL — поэтому для трека со встроенной обложкой правленая
-            // на Маке обложка из sidecar на экран НЕ попадёт. Закрыть в S3-11:
-            // либо при наличии sidecar-обложки предпочитать artworkFileURL
-            // встроенной, либо телефон при импорте материализует override как
-            // файл и не оставляет встроенную видимой. Контракт сканера (этот
-            // overlay) от решения показа не зависит и покрыт тестами.
-            if let artworkFileName = sidecar?.artworkFileName {
-                info.artworkFileURL = parent.appendingPathComponent(artworkFileName)
+            // Обложка: sidecar.artworkFileName (относительно корня) побеждает
+            // встроенную; иначе, при отсутствии встроенной, — обложка из корня.
+            if let artworkFileName = album.sidecar?.artworkFileName {
+                info.artworkFileURL = root.appendingPathComponent(artworkFileName)
             } else if info.artworkData == nil {
-                if let cached = artworkByFolder[parent.path] {
-                    info.artworkFileURL = cached
-                } else {
-                    let found = artworkFileURL(inFolder: parent)
-                    artworkByFolder[parent.path] = found
-                    info.artworkFileURL = found
-                }
+                info.artworkFileURL = album.coverURL
             }
+
             infos.append(info)
         }
         return infos
     }
 
-    /// Читает sidecar из папки. Отсутствие/битый/нечитаемый файл → `nil`
-    /// (фоллбэк к тегам), скан не падает.
+    // MARK: - Корень альбома и его инфо
+
+    /// Факты о папке для определения корня альбома.
+    private struct FolderFacts {
+        let hasPlaylist: Bool
+        let hasCover: Bool
+    }
+
+    /// Инфо корня альбома: карта дисков из плейлиста (по относительным путям),
+    /// sidecar, обложка и порядок подпапок-дисков (фоллбэк без плейлиста).
+    private struct RootAlbum {
+        let discMap: [String: M3UPlaylist.DiscInfo]
+        let sidecar: AlbumSidecar?
+        let coverURL: URL?
+        let subfolderOrdinal: [String: Int]
+    }
+
+    /// Корень альбома для файла: ближайший предок (от родителя вверх, не включая
+    /// корень скана) с плейлистом; иначе — ближайший с обложкой; иначе — родитель.
+    /// Плейлист — сильнейший сигнал (лежит в корне альбома, не в папке-диске).
+    private static func albumRoot(for url: URL, scanRoot: URL,
+                                  facts: (URL) -> FolderFacts) -> URL {
+        let parent = url.deletingLastPathComponent().standardizedFileURL
+        var ancestors: [URL] = []
+        var cur = parent
+        while cur.path != scanRoot.path && cur.path.hasPrefix(scanRoot.path + "/") {
+            ancestors.append(cur)
+            let up = cur.deletingLastPathComponent().standardizedFileURL
+            if up.path == cur.path { break }
+            cur = up
+        }
+        if let byPlaylist = ancestors.first(where: { facts($0).hasPlaylist }) {
+            return byPlaylist
+        }
+        if let byCover = ancestors.first(where: { facts($0).hasCover }) {
+            return byCover
+        }
+        return parent
+    }
+
+    private static func folderFacts(inFolder folder: URL) -> FolderFacts {
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: folder, includingPropertiesForKeys: nil
+        ) else { return FolderFacts(hasPlaylist: false, hasCover: false) }
+        let hasPlaylist = files.contains { playlistExtensions.contains($0.pathExtension.lowercased()) }
+        let hasCover = files.contains { artworkExtensions.contains($0.pathExtension.lowercased()) }
+        return FolderFacts(hasPlaylist: hasPlaylist, hasCover: hasCover)
+    }
+
+    private static func loadRootAlbum(root: URL) -> RootAlbum {
+        let sidecar = loadSidecar(inFolder: root)
+        let coverURL = artworkFileURL(inFolder: root)
+
+        var discMap: [String: M3UPlaylist.DiscInfo] = [:]
+        if let url = playlistURL(inFolder: root), let content = readText(url) {
+            discMap = M3UPlaylist.discMap(from: content)
+        }
+
+        // Порядок подпапок-дисков (фоллбэк без плейлиста): непосредственные
+        // подпапки корня, натурально отсортированные → 1-based.
+        var subfolderOrdinal: [String: Int] = [:]
+        if let entries = try? FileManager.default.contentsOfDirectory(
+            at: root, includingPropertiesForKeys: [.isDirectoryKey]
+        ) {
+            let subdirs = entries
+                .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
+                .map(\.lastPathComponent)
+                .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+            for (index, name) in subdirs.enumerated() {
+                subfolderOrdinal[name.lowercased()] = index + 1
+            }
+        }
+
+        return RootAlbum(discMap: discMap, sidecar: sidecar,
+                         coverURL: coverURL, subfolderOrdinal: subfolderOrdinal)
+    }
+
+    /// Плейлист (`.m3u`/`.m3u8`) в папке; при нескольких — первый по имени.
+    private static func playlistURL(inFolder folder: URL) -> URL? {
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: folder, includingPropertiesForKeys: nil
+        ) else { return nil }
+        return files
+            .filter { playlistExtensions.contains($0.pathExtension.lowercased()) }
+            .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+            .first
+    }
+
+    /// Путь `url` относительно корня альбома (`CD1/01.flac`); вне корня — имя файла.
+    private static func relativePath(of url: URL, under root: URL) -> String {
+        let rootPath = root.standardizedFileURL.path
+        let path = url.standardizedFileURL.path
+        if path.hasPrefix(rootPath + "/") {
+            return String(path.dropFirst(rootPath.count + 1))
+        }
+        return url.lastPathComponent
+    }
+
+    /// Первый сегмент относительного пути (папка-диск), если путь вложенный.
+    private static func firstPathComponent(_ relPath: String) -> String? {
+        let parts = relPath.split(separator: "/", omittingEmptySubsequences: true)
+        return parts.count >= 2 ? parts.first.map(String.init) : nil
+    }
+
+    // MARK: - Sidecar / текст / обложка
+
+    /// Читает sidecar из папки. Отсутствие/битый/нечитаемый файл → `nil`.
     private static func loadSidecar(inFolder folder: URL) -> AlbumSidecar? {
         let url = folder.appendingPathComponent(AlbumSidecar.fileName)
         guard let data = try? Data(contentsOf: url) else { return nil }
         return try? JSONDecoder().decode(AlbumSidecar.self, from: data)
-    }
-
-    /// Читает плейлист (`.m3u`/`.m3u8`) из папки и возвращает карту
-    /// `имя файла (нижний регистр)` → `1-based позиция`. Несколько плейлистов —
-    /// берём первый по имени (детерминизм). Нет файла/не читается → пустая карта
-    /// (трекам ничего не проставляется, скан не падает).
-    private static func loadPlaylistOrder(inFolder folder: URL) -> [String: Int] {
-        guard let files = try? FileManager.default.contentsOfDirectory(
-            at: folder, includingPropertiesForKeys: nil
-        ) else { return [:] }
-        let playlists = files
-            .filter { ["m3u", "m3u8"].contains($0.pathExtension.lowercased()) }
-            .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
-        guard let url = playlists.first, let content = readText(url) else { return [:] }
-        return M3UPlaylist.order(from: content)
     }
 
     /// Текст файла в наиболее вероятной кодировке: UTF-8 (`.m3u8` по стандарту,

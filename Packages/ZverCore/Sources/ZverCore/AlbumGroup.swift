@@ -21,28 +21,32 @@ public struct AlbumGroup: Identifiable, Equatable, Sendable {
         self.tracks = tracks
     }
 
-    /// Одна дисковая секция альбома: номер диска и его треки (уже в порядке трека).
+    /// Одна дисковая секция альбома: номер, метка и его треки (в порядке трека).
     public struct DiscSection: Identifiable, Equatable, Sendable {
         public let number: Int          // 1-based; nil-диски нормализованы в 1
+        public let label: String?       // «CD1»/«Side A» из папки/плейлиста; nil → по номеру
         public let tracks: [Track]
         public var id: Int { number }
+        /// Заголовок секции: метка как есть, иначе «Диск N».
+        public var title: String { label ?? "Диск \(number)" }
     }
 
     /// Треки, разбитые по дискам, в порядке (диск, трек). `tracks` уже
     /// отсортированы `group`, поэтому диски идут непрерывными отрезками — просто
-    /// склеиваем соседние с одинаковым номером (nil-диск нормализуем в 1).
+    /// склеиваем соседние с одинаковым номером (nil-диск нормализуем в 1). Метка
+    /// секции — из первого её трека.
     public var discSections: [DiscSection] {
-        var sections: [(number: Int, tracks: [Track])] = []
+        var sections: [(number: Int, label: String?, tracks: [Track])] = []
         for track in tracks {
             let disc = track.discNumber ?? 1
             if var last = sections.last, last.number == disc {
                 last.tracks.append(track)
                 sections[sections.count - 1] = last
             } else {
-                sections.append((number: disc, tracks: [track]))
+                sections.append((number: disc, label: track.discLabel, tracks: [track]))
             }
         }
-        return sections.map { DiscSection(number: $0.number, tracks: $0.tracks) }
+        return sections.map { DiscSection(number: $0.number, label: $0.label, tracks: $0.tracks) }
     }
 
     /// Альбом занимает больше одного диска — показывать заголовки «Диск N».
@@ -73,7 +77,7 @@ public struct AlbumGroup: Identifiable, Equatable, Sendable {
             if normalizedAlbum(track.album) == nil {
                 orphans.append(track)
             } else {
-                let folder = track.url.deletingLastPathComponent().standardizedFileURL.path
+                let folder = albumFolderPath(for: track)
                 if byFolder[folder] == nil { folderOrder.append(folder) }
                 byFolder[folder, default: []].append(track)
             }
@@ -127,6 +131,19 @@ public struct AlbumGroup: Identifiable, Equatable, Sendable {
         }
         let majority = order.max { (counts[$0] ?? 0) < (counts[$1] ?? 0) }
         return majority ?? (folderPath as NSString).lastPathComponent
+    }
+
+    /// Путь папки-альбома трека. Если у трека есть метка диска, совпадающая (без
+    /// учёта регистра) с именем его непосредственной папки (папка-диск `CD1`/
+    /// `Side A`), альбомом считаем РОДИТЕЛЬСКУЮ папку — так диски-подпапки
+    /// сворачиваются в один альбом, а не плодят по альбому на диск.
+    private static func albumFolderPath(for track: Track) -> String {
+        let parent = track.url.deletingLastPathComponent().standardizedFileURL
+        if let disc = track.discLabel,
+           parent.lastPathComponent.caseInsensitiveCompare(disc) == .orderedSame {
+            return parent.deletingLastPathComponent().standardizedFileURL.path
+        }
+        return parent.path
     }
 
     /// Пустая или пробельная строка альбома — это отсутствие альбома.

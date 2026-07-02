@@ -181,6 +181,14 @@ final class SyncHost {
                     fileSize: artwork.fileSize
                 )
             }
+            if let playlist = album.playlist {
+                let key = HostSnapshot.relativePath(albumId: album.id, fileName: playlist.fileName)
+                files[key] = HostSnapshot.ServedFile(
+                    url: folder.appendingPathComponent(playlist.fileName),
+                    sha256: playlist.sha256,
+                    fileSize: playlist.fileSize
+                )
+            }
         }
 
         let snapshot = HostSnapshot(

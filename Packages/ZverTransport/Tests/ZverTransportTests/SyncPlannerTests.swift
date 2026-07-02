@@ -56,6 +56,42 @@ import Foundation
         #expect(plan.alreadyComplete.isEmpty)
     }
 
+    // MARK: - Плейлист-компаньон + подпапки-диски
+
+    @Test func playlistParticipatesAsSeparateFile() {
+        let manifest = SyncManifest(albums: [
+            ManifestAlbum(
+                id: "A - B (2020)", title: "B", artist: "A", year: 2020,
+                playlist: ManifestFile(fileName: "playlist.m3u8", sha256: "pl", fileSize: 300),
+                tracks: [track("CD1/01.flac", sha: "t1"), track("CD2/01.flac", sha: "t2")]
+            )
+        ])
+        let plan = SyncPlanner.plan(manifest: manifest, localShasByPath: [:])
+        let pl = find(plan, albumId: "A - B (2020)", fileName: "playlist.m3u8")
+        #expect(pl?.kind == .playlist)
+        // Трек-подпуть планируется как есть — fileName несёт относительный путь.
+        #expect(find(plan, albumId: "A - B (2020)", fileName: "CD1/01.flac") != nil)
+        #expect(find(plan, albumId: "A - B (2020)", fileName: "CD2/01.flac") != nil)
+        #expect(!plan.alreadyComplete.contains("A - B (2020)"))
+    }
+
+    @Test func matchedPlaylistAndSubpathsCompleteAlbum() {
+        let manifest = SyncManifest(albums: [
+            ManifestAlbum(
+                id: "A - B (2020)", title: "B", artist: "A", year: 2020,
+                playlist: ManifestFile(fileName: "playlist.m3u8", sha256: "pl", fileSize: 300),
+                tracks: [track("CD1/01.flac", sha: "t1")]
+            )
+        ])
+        let local = [
+            "A - B (2020)/CD1/01.flac": "t1",
+            "A - B (2020)/playlist.m3u8": "pl",
+        ]
+        let plan = SyncPlanner.plan(manifest: manifest, localShasByPath: local)
+        #expect(plan.toFetch.isEmpty)
+        #expect(plan.alreadyComplete == ["A - B (2020)"])
+    }
+
     // MARK: - Полностью совпавший альбом
 
     @Test func fullyMatchedAlbumIsCompleteAndFetchesNothing() {

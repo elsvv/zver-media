@@ -72,10 +72,23 @@ import Foundation
         #expect(HTTPRouter.resolve(path: "/album/%2e%2e/01.flac") == .notFound)
     }
 
-    @Test func encodedSlashInSegmentIsRejected() {
-        // %2F декодируется в '/', создавая лишний разделитель пути → traversal.
-        #expect(HTTPRouter.resolve(path: "/album/X/sub%2Ffile.flac") == .notFound)
+    @Test func encodedSlashInFileNameIsAllowedSubpath() {
+        // Новая политика: %2F в fileName — это подпапка-диск (`CD1/01.flac`),
+        // структура альбома сохраняется. Компоненты валидируются по отдельности.
+        #expect(HTTPRouter.resolve(path: "/album/X/CD1%2F01%20-%20Overcome.flac")
+            == .album(id: "X", fileName: "CD1/01 - Overcome.flac"))
+    }
+
+    @Test func encodedSlashInAlbumIdIsRejected() {
+        // Но в albumId '/' по-прежнему запрещён — это один компонент.
         #expect(HTTPRouter.resolve(path: "/album/a%2Fb/01.flac") == .notFound)
+    }
+
+    @Test func traversalComponentInSubpathIsRejected() {
+        // Подпуть допустим, но `..`/`.`/пустой компонент внутри него — нет.
+        #expect(HTTPRouter.resolve(path: "/album/X/CD1%2F..%2F..%2Fsecret.flac") == .notFound)
+        #expect(HTTPRouter.resolve(path: "/album/X/CD1%2F.%2F01.flac") == .notFound)
+        #expect(HTTPRouter.resolve(path: "/album/X/CD1%2F%2F01.flac") == .notFound)
     }
 
     @Test func absolutePathInFileNameIsRejected() {

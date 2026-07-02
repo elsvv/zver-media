@@ -61,8 +61,15 @@ struct DownloadEngine {
         }
 
         try ensureDirectory(albumDirectory(albumId: planned.albumId))
+        // fileName может нести подпапку-диск (`CD1/01 - x.flac`) — создаём её под
+        // альбомом, иначе атомарный moveItem в финальный путь упадёт.
+        try ensureDirectory(final.deletingLastPathComponent())
         try ensureDirectory(stagingRoot)
-        let partial = stagingRoot.appendingPathComponent("\(planned.albumId)__\(planned.fileName).partial")
+        // Имя партиала держим ПЛОСКИМ: `/` из относительного пути заменяем, чтобы
+        // не плодить подпапки в staging (и не ловить «нет каталога» при записи).
+        let partialName = "\(planned.albumId)__\(planned.fileName).partial"
+            .replacingOccurrences(of: "/", with: "_")
+        let partial = stagingRoot.appendingPathComponent(partialName)
 
         let expected = Int64(planned.fileSize)
         let reportProgress: @Sendable (Int64) -> Void = { onDisk in
@@ -167,6 +174,45 @@ struct DownloadEngine {
             try data.write(to: url, options: .atomic)
         } catch {
             throw EngineError.fileSystem(underlying: error)
+        }
+    }
+
+    /// Удаляет из папки альбома файлы, которых НЕТ в манифесте (устаревшие после
+    /// реорганизации/переименования — например плоские `01.flac` после перехода
+    /// альбома на структуру `CD1/01.flac`). Сохраняет треки, обложку, плейлист и
+    /// собственный sidecar; затем убирает опустевшие подпапки-диски. Так набор
+    /// файлов альбома на диске всегда равен манифесту (без дублей-сирот).
+    func pruneStaleFiles(for album: ManifestAlbum) {
+        let dir = albumDirectory(albumId: album.id)
+        var keep: Set<String> = [AlbumSidecar.fileName]
+        for track in album.tracks { keep.insert(track.fileName) }
+        if let artwork = album.artwork { keep.insert(artwork.fileName) }
+        if let playlist = album.playlist { keep.insert(playlist.fileName) }
+
+        let dirPath = dir.standardizedFileURL.path
+        guard let enumerator = FileManager.default.enumerator(
+            at: dir, includingPropertiesForKeys: [.isDirectoryKey]
+        ) else { return }
+
+        var subdirs: [URL] = []
+        for case let url as URL in enumerator {
+            if (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
+                subdirs.append(url)
+                continue
+            }
+            let path = url.standardizedFileURL.path
+            let rel = path.hasPrefix(dirPath + "/")
+                ? String(path.dropFirst(dirPath.count + 1))
+                : url.lastPathComponent
+            if !keep.contains(rel) {
+                try? FileManager.default.removeItem(at: url)
+            }
+        }
+        // Опустевшие подпапки — глубже сначала (по длине пути).
+        for sub in subdirs.sorted(by: { $0.path.count > $1.path.count }) {
+            if (try? FileManager.default.contentsOfDirectory(atPath: sub.path))?.isEmpty == true {
+                try? FileManager.default.removeItem(at: sub)
+            }
         }
     }
 

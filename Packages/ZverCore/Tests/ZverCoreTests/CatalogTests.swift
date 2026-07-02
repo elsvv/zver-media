@@ -173,12 +173,39 @@ import Testing
         let track = Track(
             url: URL(fileURLWithPath: "/docs/Mezzanine/CD2/01.flac"),
             title: "Metal Banshee", album: "Mezzanine",
-            trackNumber: 1, discNumber: 2, duration: 300, sampleRate: 44100)
+            trackNumber: 1, discNumber: 2, discLabel: "CD2", duration: 300, sampleRate: 44100)
         let record = TrackRecord(track: track, relativePath: "Mezzanine/CD2/01.flac",
                                  artworkFilePath: nil)
         #expect(record.discNumber == 2)
+        #expect(record.discLabel == "CD2")
         let back = record.track(documentsURL: URL(fileURLWithPath: "/docs"))
         #expect(back.discNumber == 2)
+        #expect(back.discLabel == "CD2")
+    }
+
+    // MARK: - Миграция v4 (discLabel)
+
+    @Test func migrationV4AddsDiscLabelColumn() throws {
+        let catalog = try Catalog.inMemory()
+        let columns = try catalog.dbQueue.read { db in
+            try db.columns(in: "track").map(\.name)
+        }
+        #expect(columns.contains("discLabel"))
+    }
+
+    @Test func insertFetchRoundtripPreservesDiscLabel() throws {
+        let catalog = try Catalog.inMemory()
+        let record = TrackRecord(
+            relativePath: "Maxinquaye/CD1/01.flac", title: "Overcome",
+            trackNumber: 1, discNumber: 1, discLabel: "CD1",
+            duration: 300, sampleRate: 44100,
+            addedAt: Date(timeIntervalSince1970: 1_750_000_000))
+        try catalog.dbQueue.write { db in try record.insert(db) }
+        let fetched = try catalog.dbQueue.read { db in
+            try TrackRecord.fetchOne(db, key: "Maxinquaye/CD1/01.flac")
+        }
+        #expect(fetched?.discLabel == "CD1")
+        #expect(fetched == record)
     }
 
     // MARK: - Roundtrip TrackRecord
