@@ -64,6 +64,16 @@ public final class CatalogStore: Sendable {
     /// И fileState ∈ {local, uploading}. Только такие удаляются при пропаже
     /// файла. Облачные (cloudSha != nil ИЛИ fileState ∈ {backedUp, remote,
     /// downloading}) сохраняются всегда.
+    /// Удаляет строки треков по относительным путям (удаление альбома целиком,
+    /// в т.ч. облачных `remote`/`backedUp`, которые reconcile сам не трогает).
+    /// Плейлистные связи чистятся каскадом. Пустой список — no-op.
+    public func deleteTracks(relativePaths: [String]) throws {
+        guard !relativePaths.isEmpty else { return }
+        try catalog.dbQueue.write { db in
+            _ = try TrackRecord.deleteAll(db, keys: relativePaths)
+        }
+    }
+
     private func isPurelyLocal(_ record: TrackRecord) -> Bool {
         guard record.cloudSha == nil else { return false }
         switch FileState(rawValue: record.fileState) ?? .local {

@@ -413,6 +413,24 @@ final class BackupService: ObservableObject {
         return true
     }
 
+    /// Удаляет копию трека в облаке (Яндекс.Диск; 404 — идемпотентно ок). Локальные
+    /// файлы и каталог НЕ трогает — состоянием после удаления управляет вызывающий
+    /// (LibraryStore: удаляет строки и пере-сканирует). Возвращает true при успехе.
+    func deleteFromCloud(track: Track) async -> Bool {
+        guard let relativePath = CloudPaths.relativePath(of: track.url, documentsURL: documentsURL)
+        else { return false }
+        let remotePath = CloudPaths.remotePath(forRelativePath: relativePath)
+        do {
+            try await store.delete(path: remotePath)
+            return true
+        } catch let error as RemoteError {
+            recordTopLevel(error)
+            return false
+        } catch {
+            return false
+        }
+    }
+
     // MARK: - Очередь и обработка событий
 
     /// Строит очередь выгрузки с обработчиком событий, мапящим стадии передачи в

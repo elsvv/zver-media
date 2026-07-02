@@ -16,6 +16,16 @@ struct AlbumDetailView: View {
     @State private var albumDescription: String?
     @State private var isDescriptionExpanded = false
 
+    @Environment(\.dismiss) private var dismiss
+    @State private var pending: PendingKind?
+    @State private var isRenaming = false
+    @State private var renameText = ""
+
+    private enum PendingKind: Identifiable {
+        case device, cloud, everywhere, local
+        var id: Int { hashValue }
+    }
+
     var body: some View {
         List {
             Section {
@@ -69,6 +79,16 @@ struct AlbumDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { albumMenu }
         .task { await loadDescription() }
+        .confirmationDialog("«\(group.album)»", isPresented: pendingPresented,
+                            titleVisibility: .visible, presenting: pending) { kind in
+            confirmButton(for: kind)
+            Button("Отмена", role: .cancel) {}
+        }
+        .alert("Переименовать альбом", isPresented: $isRenaming) {
+            TextField("Название", text: $renameText)
+            Button("Сохранить") { Task { await store.renameAlbum(group, to: renameText) } }
+            Button("Отмена", role: .cancel) {}
+        }
     }
 
     // MARK: - Список треков
@@ -217,25 +237,91 @@ struct AlbumDetailView: View {
         }
     }
 
-    /// Меню альбома в навбаре: облачные действия уровня альбома.
+    /// Меню альбома в навбаре: переименование, облачные действия, удаление.
+    /// Опасные пункты — под confirm (см. confirmationDialog). После полного
+    /// удаления экран закрывается (альбома больше нет).
     @ToolbarContentBuilder
     private var albumMenu: some ToolbarContent {
         ToolbarItem(placement: .topBarTrailing) {
             Menu {
                 Button {
-                    // Бэкап уровня альбома отдельным API не выражается: BackupService
-                    // умеет бэкапить все ожидающие `local`-треки библиотеки скопом
-                    // (`backupAll`) — этого достаточно, чтобы треки альбома уехали в
-                    // облако. Точечный «бэкап только этого альбома» — TODO (нужен
-                    // новый метод в BackupService, вне рамок правки UI).
-                    Task { await store.backupAll() }
+                    renameText = group.album
+                    isRenaming = true
                 } label: {
-                    Label("Сделать бэкап в облако", systemImage: "icloud.and.arrow.up")
+                    Label("Переименовать", systemImage: "pencil")
+                }
+                if hasRemoteTracks {
+                    Button { downloadRemoteTracks() } label: {
+                        Label("Скачать", systemImage: "icloud.and.arrow.down")
+                    }
+                }
+                Button { Task { await store.backupAll() } } label: {
+                    Label("Бэкап в облако", systemImage: "icloud.and.arrow.up")
+                }
+                if hasBackedUpTracks {
+                    Button { pending = .device } label: {
+                        Label("Убрать с устройства", systemImage: "iphone.slash")
+                    }
+                }
+                Divider()
+                if hasCloudTracks {
+                    Button(role: .destructive) { pending = .cloud } label: {
+                        Label("Удалить из облака", systemImage: "icloud.slash")
+                    }
+                    Button(role: .destructive) { pending = .everywhere } label: {
+                        Label("Удалить везде", systemImage: "trash")
+                    }
+                } else {
+                    Button(role: .destructive) { pending = .local } label: {
+                        Label("Удалить", systemImage: "trash")
+                    }
                 }
             } label: {
                 Image(systemName: "ellipsis.circle")
             }
         }
+    }
+
+    @ViewBuilder
+    private func confirmButton(for kind: PendingKind) -> some View {
+        switch kind {
+        case .device:
+            Button("Убрать с устройства", role: .destructive) { runDeletion(.device) }
+        case .cloud:
+            Button("Удалить из облака", role: .destructive) { runDeletion(.cloud) }
+        case .everywhere:
+            Button("Удалить везде", role: .destructive) { runDeletion(.everywhere) }
+        case .local:
+            Button("Удалить", role: .destructive) { runDeletion(.local) }
+        }
+    }
+
+    private var pendingPresented: Binding<Bool> {
+        Binding(get: { pending != nil }, set: { if !$0 { pending = nil } })
+    }
+
+    /// Выполняет действие; закрывает экран, если альбом после него исчезает
+    /// (полное удаление или удаление из облака у remote-only).
+    private func runDeletion(_ kind: PendingKind) {
+        let dismisses = kind == .local || kind == .everywhere
+            || (kind == .cloud && isRemoteOnly)
+        Task {
+            switch kind {
+            case .device: await store.removeFromDevice([group])
+            case .cloud: await store.deleteFromCloud([group])
+            case .everywhere: await store.deleteEverywhere([group])
+            case .local: await store.deleteLocally([group])
+            }
+            if dismisses { dismiss() }
+        }
+    }
+
+    private var isRemoteOnly: Bool {
+        !group.tracks.isEmpty && group.tracks.allSatisfy { $0.fileState == .remote }
+    }
+    private var hasBackedUpTracks: Bool { group.tracks.contains { $0.fileState == .backedUp } }
+    private var hasCloudTracks: Bool {
+        group.tracks.contains { $0.fileState == .backedUp || $0.fileState == .remote }
     }
 
     // MARK: - Действия и данные
