@@ -174,6 +174,7 @@ final class ImportCoordinator: ObservableObject {
             // Альбом уже целиком на месте: только sidecar + переход к confirm.
             setPhase(.finalizing, for: albumId)
             try engine.writeSidecar(for: album)
+            engine.pruneStaleFiles(for: album)
             return
         }
 
@@ -194,9 +195,11 @@ final class ImportCoordinator: ObservableObject {
             updateDownloadingPhase(albumId: albumId, completed: completedAlready, total: total)
         }
 
-        // Все файлы альбома разложены и сверены: материализуем правки в sidecar.
+        // Все файлы альбома разложены и сверены: материализуем правки в sidecar
+        // и убираем устаревшие файлы (напр. плоские до реорганизации в CD-папки).
         setPhase(.finalizing, for: albumId)
         try engine.writeSidecar(for: album)
+        engine.pruneStaleFiles(for: album)
     }
 
     /// Пересчитывает и публикует фазу `.downloading` по накопленному прогрессу.
