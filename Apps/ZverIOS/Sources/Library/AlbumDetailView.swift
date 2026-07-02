@@ -340,13 +340,11 @@ struct AlbumDetailView: View {
         group.tracks.contains { $0.fileState == .remote }
     }
 
-    /// Скачивает все облачные (remote) треки альбома по очереди.
+    /// Скачивает все облачные (remote) треки альбома. Делегирует
+    /// ``LibraryStore/downloadAlbums(_:)``, который дедупит по контейнеру: cue-альбом
+    /// (N логических треков в одном `.flac`) качается один раз, а не N.
     private func downloadRemoteTracks() {
-        Task {
-            for track in group.tracks where track.fileState == .remote {
-                await store.download(track: track)
-            }
-        }
+        Task { await store.downloadAlbums([group]) }
     }
 
     /// «2003 • 24 бит • 96 кГц • FLAC» — год (если есть) + числовое качество и

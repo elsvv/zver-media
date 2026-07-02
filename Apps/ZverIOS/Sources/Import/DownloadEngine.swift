@@ -179,15 +179,15 @@ struct DownloadEngine {
 
     /// Удаляет из папки альбома файлы, которых НЕТ в манифесте (устаревшие после
     /// реорганизации/переименования — например плоские `01.flac` после перехода
-    /// альбома на структуру `CD1/01.flac`). Сохраняет треки, обложку, плейлист и
-    /// собственный sidecar; затем убирает опустевшие подпапки-диски. Так набор
-    /// файлов альбома на диске всегда равен манифесту (без дублей-сирот).
+    /// альбома на структуру `CD1/01.flac`). Сохраняет треки, обложку, плейлист,
+    /// extras (`.cue`/`.log`) и собственный sidecar; затем убирает опустевшие
+    /// подпапки-диски. Так набор файлов альбома на диске всегда равен манифесту
+    /// (без дублей-сирот). Extras держим — иначе `.cue` вычистило бы и телефон
+    /// перестал раскрывать образ, а `.log` (целостность релиза) потерялся бы.
     func pruneStaleFiles(for album: ManifestAlbum) {
         let dir = albumDirectory(albumId: album.id)
         var keep: Set<String> = [AlbumSidecar.fileName]
-        for track in album.tracks { keep.insert(track.fileName) }
-        if let artwork = album.artwork { keep.insert(artwork.fileName) }
-        if let playlist = album.playlist { keep.insert(playlist.fileName) }
+        for file in album.servableFiles { keep.insert(file.fileName) }
 
         let dirPath = dir.standardizedFileURL.path
         guard let enumerator = FileManager.default.enumerator(

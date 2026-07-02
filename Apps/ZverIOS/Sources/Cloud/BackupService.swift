@@ -51,6 +51,15 @@ final class BackupService: ObservableObject {
     /// `done`). Заполняется при постановке в очередь, читается в обработчике события.
     private var expectedShas: [String: String] = [:]
 
+    /// Контейнеры (`relativePath`) с активной ручной передачей (download/offload). Гейт
+    /// против ПАРАЛЛЕЛЬНЫХ операций над одним `.flac`: у cue-альбома каждая из N строк
+    /// даёт свой пункт «Скачать»/«Выгрузить», а тап по `remote`-строке тоже качает —
+    /// два вызова на один контейнер писали бы в один staging/финальный файл (порча) и
+    /// гоняли бы `fileState`. Проверка-и-вставка синхронна на MainActor (до первого
+    /// `await`), поэтому второй вызов того же контейнера сразу отбивается. Одно множество
+    /// на download И offload: обе операции трогают тот же физический файл.
+    private var inFlightContainers: Set<String> = []
+
     /// Хэндлы фоновых задач, дописывающих `fileState`/`cloudSha` в каталог из событий
     /// очереди (детач-записи в БД). `backupAwaitingTracks` дожидается ИХ ЗАВЕРШЕНИЯ перед
     /// `backupCatalog()`, иначе залитый `catalog.sqlite.backup` может зафиксировать треки
@@ -149,9 +158,17 @@ final class BackupService: ObservableObject {
         let documentsURL = self.documentsURL
 
         // Кандидаты + их локальные sha считаем на детаче (хеширование файлов тяжёлое).
+        // Дедуп по `relativePath` (контейнеру): у cue-альбома N логических треков делят
+        // один `.flac`, поэтому `tracksAwaitingBackup()` вернёт N строк с одним
+        // `relativePath` — контейнер грузим ОДИН раз (иначе — N выгрузок 258 МБ подряд).
+        // Успешный `done` пометит backedUp все N строк лок-степом (по `relativePath`).
         let items: [BackupItem] = await Task.detached(priority: .utility) {
             guard let awaiting = try? catalogStore.tracksAwaitingBackup() else { return [] }
-            return awaiting.compactMap { Self.backupItem(for: $0, documentsURL: documentsURL) }
+            var seen = Set<String>()
+            return awaiting.compactMap { record -> BackupItem? in
+                guard seen.insert(record.relativePath).inserted else { return nil }
+                return Self.backupItem(for: record, documentsURL: documentsURL)
+            }
         }.value
 
         guard !items.isEmpty else {
@@ -286,6 +303,11 @@ final class BackupService: ObservableObject {
         guard let relativePath = CloudPaths.relativePath(of: track.url, documentsURL: documentsURL) else {
             return false
         }
+        // Гейт по контейнеру: параллельные download/offload одного `.flac` (у cue-альбома
+        // N строк дают N кнопок) коалесцируем в одну — иначе два скачивания в один
+        // staging/финальный файл портят передачу и гоняют состояние.
+        guard inFlightContainers.insert(relativePath).inserted else { return false }
+        defer { inFlightContainers.remove(relativePath) }
         let remotePath = CloudPaths.remotePath(forRelativePath: relativePath)
         let finalURL = track.url
 
@@ -364,6 +386,12 @@ final class BackupService: ObservableObject {
         guard track.fileState == .backedUp,
               let relativePath = CloudPaths.relativePath(of: track.url, documentsURL: documentsURL)
         else { return false }
+
+        // Гейт по контейнеру (см. `download`/`inFlightContainers`): не выгружать `.flac`,
+        // пока идёт его скачивание/другая выгрузка — иначе удаление файла и запись
+        // состояния гонятся с параллельной операцией.
+        guard inFlightContainers.insert(relativePath).inserted else { return false }
+        defer { inFlightContainers.remove(relativePath) }
 
         guard let cloudSha = await cloudSha(forRelativePath: relativePath), !cloudSha.isEmpty else {
             return false
@@ -506,16 +534,20 @@ final class BackupService: ObservableObject {
     /// регистрируется в `pendingCatalogWrites`, чтобы автобэкап мог дождаться записи
     /// перед заливкой `catalog.sqlite`.
     private func setState(_ relativePath: String, _ state: FileState, cloudSha: String? = nil) {
+        // Лок-степ: `container:`-апдейтер меняет ВСЕ строки одного `relativePath` в
+        // одной транзакции — для обычного трека это ровно одна строка, для cue-альбома
+        // все N логических треков контейнера двигаются синхронно.
         enqueueCatalogWrite { catalogStore in
-            try? catalogStore.setFileState(relativePath: relativePath, state, cloudSha: cloudSha)
+            try? catalogStore.setFileState(container: relativePath, state, cloudSha: cloudSha)
         }
     }
 
     /// Помечает трек подтверждённым в облаке (после сверки sha). Запись — через ту же
-    /// сериализованную цепочку (см. `enqueueCatalogWrite`).
+    /// сериализованную цепочку (см. `enqueueCatalogWrite`). Лок-степ по контейнеру:
+    /// все N cue-строк одного `.flac` получают `backedUp` + общий `cloudSha`.
     private func markBackedUp(_ relativePath: String, cloudSha: String) {
         enqueueCatalogWrite { catalogStore in
-            try? catalogStore.markBackedUp(relativePath: relativePath, cloudSha: cloudSha)
+            try? catalogStore.markBackedUp(container: relativePath, cloudSha: cloudSha)
         }
     }
 

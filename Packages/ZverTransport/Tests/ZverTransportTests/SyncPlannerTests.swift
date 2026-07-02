@@ -248,6 +248,106 @@ import Foundation
         #expect(plan.alreadyComplete == ["A - B (2020)"])
     }
 
+    // MARK: - Cue-образ: дедуп аудио по fileName + extras
+
+    /// Cue-трек-превью: N штук делят один `fileName` контейнера (общие sha/size).
+    private func cueTrack(_ fileName: String, sha: String, title: String, size: Int = 258_000_000) -> ManifestTrack {
+        ManifestTrack(fileName: fileName, title: title, artist: "A", album: "B",
+                      trackNumber: 1, year: 2020, duration: 100, sampleRate: 44100,
+                      bitDepth: 16, fileSize: size, sha256: sha, fileExtension: "flac")
+    }
+
+    @Test func cueAlbumFetchesContainerOnceAndPlansExtras() {
+        // Три логических cue-трека делят Album.flac; extras — Album.cue/.log.
+        let manifest = SyncManifest(albums: [
+            ManifestAlbum(
+                id: "A - B (2020)", title: "B", artist: "A", year: 2020,
+                extras: [
+                    ManifestFile(fileName: "Album.cue", sha256: "cue", fileSize: 1024),
+                    ManifestFile(fileName: "Album.log", sha256: "log", fileSize: 7000),
+                ],
+                tracks: [
+                    cueTrack("Album.flac", sha: "flac", title: "One"),
+                    cueTrack("Album.flac", sha: "flac", title: "Two"),
+                    cueTrack("Album.flac", sha: "flac", title: "Three"),
+                ])
+        ])
+        let plan = SyncPlanner.plan(manifest: manifest, localShasByPath: [:])
+
+        // Контейнер РОВНО один раз (не 3×258 МБ) + 2 extras = 3 файла.
+        #expect(plan.toFetch.count == 3)
+        let flacs = plan.toFetch.filter { $0.fileName == "Album.flac" }
+        #expect(flacs.count == 1)
+        #expect(flacs.first?.kind == .track)
+        #expect(flacs.first?.fileSize == 258_000_000)
+        // Extras запланированы с kind .extra.
+        let cue = find(plan, albumId: "A - B (2020)", fileName: "Album.cue")
+        let log = find(plan, albumId: "A - B (2020)", fileName: "Album.log")
+        #expect(cue?.kind == .extra)
+        #expect(cue?.sha256 == "cue")
+        #expect(log?.kind == .extra)
+        #expect(log?.fileSize == 7000)
+        #expect(!plan.alreadyComplete.contains("A - B (2020)"))
+    }
+
+    @Test func cueAlbumCompleteWhenContainerAndExtrasMatch() {
+        let manifest = SyncManifest(albums: [
+            ManifestAlbum(
+                id: "A - B (2020)", title: "B", artist: "A", year: 2020,
+                extras: [ManifestFile(fileName: "Album.cue", sha256: "cue", fileSize: 1024)],
+                tracks: [
+                    cueTrack("Album.flac", sha: "flac", title: "One"),
+                    cueTrack("Album.flac", sha: "flac", title: "Two"),
+                ])
+        ])
+        // Контейнер и cue уже лежат и совпали → альбом complete, качать нечего.
+        let local = [
+            "A - B (2020)/Album.flac": "flac",
+            "A - B (2020)/Album.cue": "cue",
+        ]
+        let plan = SyncPlanner.plan(manifest: manifest, localShasByPath: local)
+        #expect(plan.toFetch.isEmpty)
+        #expect(plan.alreadyComplete == ["A - B (2020)"])
+    }
+
+    @Test func cueAlbumIncompleteWhenExtraMissing() {
+        // Контейнер совпал, но `.cue` отсутствует локально → докачиваем только cue,
+        // альбом не complete (иначе телефон не смог бы раскрыть образ).
+        let manifest = SyncManifest(albums: [
+            ManifestAlbum(
+                id: "A - B (2020)", title: "B", artist: "A", year: 2020,
+                extras: [ManifestFile(fileName: "Album.cue", sha256: "cue", fileSize: 1024)],
+                tracks: [
+                    cueTrack("Album.flac", sha: "flac", title: "One"),
+                    cueTrack("Album.flac", sha: "flac", title: "Two"),
+                ])
+        ])
+        let local = ["A - B (2020)/Album.flac": "flac"]
+        let plan = SyncPlanner.plan(manifest: manifest, localShasByPath: local)
+        #expect(plan.toFetch.count == 1)
+        #expect(find(plan, albumId: "A - B (2020)", fileName: "Album.cue")?.kind == .extra)
+        #expect(plan.alreadyComplete.isEmpty)
+    }
+
+    @Test func changedExtraIsReFetched() {
+        // `.cue` пересчитали на Маке (sha разошёлся) → докачиваем как extra.
+        let manifest = SyncManifest(albums: [
+            ManifestAlbum(
+                id: "A - B (2020)", title: "B", artist: "A", year: 2020,
+                extras: [ManifestFile(fileName: "Album.cue", sha256: "cue-new", fileSize: 1024)],
+                tracks: [cueTrack("Album.flac", sha: "flac", title: "One")])
+        ])
+        let local = [
+            "A - B (2020)/Album.flac": "flac",
+            "A - B (2020)/Album.cue": "cue-old",
+        ]
+        let plan = SyncPlanner.plan(manifest: manifest, localShasByPath: local)
+        #expect(plan.toFetch.count == 1)
+        let cue = find(plan, albumId: "A - B (2020)", fileName: "Album.cue")
+        #expect(cue?.kind == .extra)
+        #expect(cue?.sha256 == "cue-new")
+    }
+
     // MARK: - Пустой манифест
 
     @Test func emptyManifestPlansNothing() {

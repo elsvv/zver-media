@@ -491,6 +491,242 @@ import Testing
         #expect(three?.cloudSha == "h3")
     }
 
+    // MARK: - reconcile cue-альбомов (N строк одного контейнера)
+
+    /// N cue-записей одного `.flac`: делят relativePath, различаются trackKey.
+    private func cueRecords(container: String, count: Int) -> [TrackRecord] {
+        (1...count).map { i in
+            TrackRecord(relativePath: container, title: "Трек \(i)",
+                        duration: 100, sampleRate: 44100,
+                        addedAt: Date(timeIntervalSince1970: 1_750_000_000),
+                        cueIndex: i, startFrame: Int64((i - 1) * 4_410_000),
+                        frameCount: 4_410_000)
+        }
+    }
+
+    @Test func reconcileInsertsAllCueRowsSharingOneContainer() throws {
+        let catalog = try Catalog.inMemory()
+        let store = CatalogStore(catalog: catalog)
+
+        try store.reconcile(scanned: cueRecords(container: "alb/CD.flac", count: 3))
+
+        let rows = try catalog.dbQueue.read { db in
+            try String.fetchAll(db, sql: "SELECT trackKey FROM track ORDER BY trackKey")
+        }
+        #expect(rows == ["alb/CD.flac#1", "alb/CD.flac#2", "alb/CD.flac#3"])
+        // все три делят один контейнер
+        let paths = try catalog.dbQueue.read { db in
+            try String.fetchAll(db, sql: "SELECT DISTINCT relativePath FROM track")
+        }
+        #expect(paths == ["alb/CD.flac"])
+    }
+
+    @Test func reconcileUpdatesCueRowTitlesKeyedByTrackKey() throws {
+        let catalog = try Catalog.inMemory()
+        let store = CatalogStore(catalog: catalog)
+        try store.reconcile(scanned: cueRecords(container: "alb/CD.flac", count: 2))
+
+        // повторный скан: у трека #2 сменилось название
+        try store.reconcile(scanned: [
+            TrackRecord(relativePath: "alb/CD.flac", title: "Трек 1", duration: 100,
+                        sampleRate: 44100, cueIndex: 1, startFrame: 0, frameCount: 4_410_000),
+            TrackRecord(relativePath: "alb/CD.flac", title: "Новое имя", duration: 100,
+                        sampleRate: 44100, cueIndex: 2, startFrame: 4_410_000, frameCount: 4_410_000),
+        ])
+
+        let titles = try store.allTracks(documentsURL: documents).map(\.title)
+        #expect(titles == ["Трек 1", "Новое имя"])
+        #expect(try catalog.dbQueue.read { db in try TrackRecord.fetchCount(db) } == 2)
+    }
+
+    @Test func reconcileRemovesAllCueRowsWhenContainerFileGone() throws {
+        // Контейнер .flac пропал с диска → в скане нет ни одной его строки →
+        // удаляются все N cue-строк разом.
+        let catalog = try Catalog.inMemory()
+        let store = CatalogStore(catalog: catalog)
+        try store.reconcile(scanned:
+            cueRecords(container: "alb/CD.flac", count: 3)
+            + [record(path: "other.flac", title: "Другой")]
+        )
+
+        // остался только other.flac; cue-контейнер пропал
+        try store.reconcile(scanned: [record(path: "other.flac", title: "Другой")])
+
+        let titles = try store.allTracks(documentsURL: documents).map(\.title)
+        #expect(titles == ["Другой"])
+        #expect(try catalog.dbQueue.read { db in try TrackRecord.fetchCount(db) } == 1)
+    }
+
+    @Test func reconcileKeepsAllCueRowsWhileContainerPresent() throws {
+        let catalog = try Catalog.inMemory()
+        let store = CatalogStore(catalog: catalog)
+        try store.reconcile(scanned: cueRecords(container: "alb/CD.flac", count: 3))
+
+        // файл на месте — все три строки снова в скане, ничего не удаляется
+        try store.reconcile(scanned: cueRecords(container: "alb/CD.flac", count: 3))
+
+        #expect(try catalog.dbQueue.read { db in try TrackRecord.fetchCount(db) } == 3)
+    }
+
+    @Test func reconcileReapsGiantTrackWhenContainerBecomesCue() throws {
+        // Апгрейд-кейс (главный): раньше `.flac` сканировался как ОДИН гигантский трек
+        // (trackKey == relativePath). После прихода `.cue` рескан даёт N cue-строк
+        // (trackKey == relativePath#i) ТОГО ЖЕ контейнера (relativePath в скане!).
+        // Фантомный гигант ОБЯЗАН исчезнуть — иначе висит дублем на весь файл рядом с
+        // N треками (и в другом облачном состоянии). reconcile должен реапить
+        // устаревший trackKey даже при присутствующем контейнере.
+        let catalog = try Catalog.inMemory()
+        let store = CatalogStore(catalog: catalog)
+        try store.reconcile(scanned: [record(path: "alb/CD.flac", title: "Весь диск")])
+
+        try store.reconcile(scanned: cueRecords(container: "alb/CD.flac", count: 3))
+
+        let keys = try catalog.dbQueue.read { db in
+            try String.fetchAll(db, sql: "SELECT trackKey FROM track ORDER BY trackKey")
+        }
+        #expect(keys == ["alb/CD.flac#1", "alb/CD.flac#2", "alb/CD.flac#3"])  // ровно 3, не 4
+    }
+
+    @Test func reconcileReapsOrphanCueRowsWhenTrackCountShrinks() throws {
+        // Исправленный `.cue` с меньшим числом TRACK: осиротевшие `#k` строки того же
+        // (присутствующего) контейнера должны исчезнуть.
+        let catalog = try Catalog.inMemory()
+        let store = CatalogStore(catalog: catalog)
+        try store.reconcile(scanned: cueRecords(container: "alb/CD.flac", count: 3))
+
+        try store.reconcile(scanned: cueRecords(container: "alb/CD.flac", count: 2))
+
+        let keys = try catalog.dbQueue.read { db in
+            try String.fetchAll(db, sql: "SELECT trackKey FROM track ORDER BY trackKey")
+        }
+        #expect(keys == ["alb/CD.flac#1", "alb/CD.flac#2"])
+    }
+
+    @Test func reconcileKeepsBackedUpGiantEvenWhenContainerBecomesCue() throws {
+        // Край: гигант был выгружен в облако (backedUp+cloudSha). Реап устаревшего
+        // trackKey гейтится isPurelyLocal — облачную строку НЕ трогаем (консервативно,
+        // без потери подтверждённого в облаке). Приемлемый край v1: возможен дубль до
+        // ручной чистки; главное — не удалять облачные данные.
+        let catalog = try Catalog.inMemory()
+        let store = CatalogStore(catalog: catalog)
+        try insert(TrackRecord(relativePath: "alb/CD.flac", title: "Весь диск",
+                               duration: 100, sampleRate: 44100,
+                               fileState: FileState.backedUp.rawValue, cloudSha: "sha"),
+                   into: catalog)
+
+        try store.reconcile(scanned: cueRecords(container: "alb/CD.flac", count: 3))
+
+        // 3 cue + 1 облачный гигант = 4 (гигант сохранён)
+        #expect(try catalog.dbQueue.read { db in try TrackRecord.fetchCount(db) } == 4)
+    }
+
+    @Test func reconcileKeepsBackedUpCueContainerAbsentFromScan() throws {
+        // Лок-степ: cue-контейнер выгружен в облако (все N строк backedUp+cloudSha)
+        // и физически отсутствует → переживает reconcile целиком.
+        let catalog = try Catalog.inMemory()
+        let store = CatalogStore(catalog: catalog)
+        for i in 1...3 {
+            try insert(TrackRecord(relativePath: "alb/CD.flac", title: "Трек \(i)",
+                                   duration: 100, sampleRate: 44100,
+                                   fileState: FileState.backedUp.rawValue, cloudSha: "sha",
+                                   cueIndex: i, startFrame: Int64((i - 1) * 4_410_000),
+                                   frameCount: 4_410_000),
+                       into: catalog)
+        }
+
+        try store.reconcile(scanned: [])
+
+        #expect(try catalog.dbQueue.read { db in try TrackRecord.fetchCount(db) } == 3)
+    }
+
+    @Test func deleteTracksRemovesAllCueRowsOfContainer() throws {
+        let catalog = try Catalog.inMemory()
+        let store = CatalogStore(catalog: catalog)
+        try store.reconcile(scanned:
+            cueRecords(container: "alb/CD.flac", count: 3)
+            + [record(path: "other.flac", title: "Другой")]
+        )
+
+        // удаление альбома целиком по контейнеру сносит все N cue-строк
+        try store.deleteTracks(relativePaths: ["alb/CD.flac"])
+
+        #expect(try store.allTracks(documentsURL: documents).map(\.title) == ["Другой"])
+    }
+
+    // MARK: - Облачные апдейтеры по контейнеру (лок-степ)
+
+    @Test func setFileStateContainerTouchesAllSiblingRows() throws {
+        let catalog = try Catalog.inMemory()
+        let store = CatalogStore(catalog: catalog)
+        try store.reconcile(scanned: cueRecords(container: "alb/CD.flac", count: 3))
+
+        try store.setFileState(container: "alb/CD.flac", .uploading)
+
+        let states = try catalog.dbQueue.read { db in
+            try String.fetchAll(db, sql: "SELECT fileState FROM track")
+        }
+        #expect(states == Array(repeating: FileState.uploading.rawValue, count: 3))
+    }
+
+    @Test func setFileStateContainerWritesCloudShaToAllRows() throws {
+        let catalog = try Catalog.inMemory()
+        let store = CatalogStore(catalog: catalog)
+        try store.reconcile(scanned: cueRecords(container: "alb/CD.flac", count: 3))
+
+        try store.setFileState(container: "alb/CD.flac", .remote, cloudSha: "sha-lockstep")
+
+        let rows = try catalog.dbQueue.read { db in try TrackRecord.fetchAll(db) }
+        #expect(rows.count == 3)
+        #expect(rows.allSatisfy { $0.fileState == FileState.remote.rawValue })
+        #expect(rows.allSatisfy { $0.cloudSha == "sha-lockstep" })
+    }
+
+    @Test func markBackedUpContainerMarksAllRows() throws {
+        let catalog = try Catalog.inMemory()
+        let store = CatalogStore(catalog: catalog)
+        for i in 1...3 {
+            try insert(TrackRecord(relativePath: "alb/CD.flac", title: "Трек \(i)",
+                                   duration: 100, sampleRate: 44100,
+                                   fileState: FileState.uploading.rawValue,
+                                   cueIndex: i, startFrame: Int64((i - 1) * 4_410_000),
+                                   frameCount: 4_410_000),
+                       into: catalog)
+        }
+
+        try store.markBackedUp(container: "alb/CD.flac", cloudSha: "verified")
+
+        let rows = try catalog.dbQueue.read { db in try TrackRecord.fetchAll(db) }
+        #expect(rows.count == 3)
+        #expect(rows.allSatisfy { $0.fileState == FileState.backedUp.rawValue })
+        #expect(rows.allSatisfy { $0.cloudSha == "verified" })
+    }
+
+    @Test func setFileStateContainerLeavesOtherContainersUntouched() throws {
+        let catalog = try Catalog.inMemory()
+        let store = CatalogStore(catalog: catalog)
+        try store.reconcile(scanned:
+            cueRecords(container: "alb/CD.flac", count: 2)
+            + [record(path: "solo.flac", title: "Соло")]
+        )
+
+        try store.setFileState(container: "alb/CD.flac", .uploading)
+
+        // одиночный трек другого контейнера не тронут
+        let solo = try catalog.dbQueue.read { db in
+            try TrackRecord.fetchOne(db, key: "solo.flac")
+        }
+        #expect(solo?.fileState == FileState.local.rawValue)
+    }
+
+    @Test func setFileStateContainerOnMissingIsNoOp() throws {
+        let catalog = try Catalog.inMemory()
+        let store = CatalogStore(catalog: catalog)
+
+        try store.setFileState(container: "ghost.flac", .uploading)
+
+        #expect(try store.allTracks(documentsURL: documents).isEmpty)
+    }
+
     // MARK: - allTracks
 
     @Test func allTracksSortedByRelativePathAndResolvedAgainstDocuments() throws {

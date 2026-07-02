@@ -208,6 +208,168 @@ import Testing
         #expect(fetched == record)
     }
 
+    // MARK: - Миграция v5 (trackKey PK + границы cue)
+
+    /// Строит БД на схеме v4 (до cue) с треками/плейлистом и возвращает путь.
+    /// Открытие актуальным `Catalog` затем применит поверх миграцию v5.
+    private func makeV4Database() throws -> String {
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("catalog-v5-\(UUID().uuidString).sqlite").path
+        let db = try DatabaseQueue(path: path)
+        var m = DatabaseMigrator()
+        m.registerMigration("v1") { db in
+            try db.create(table: "track") { t in
+                t.primaryKey("relativePath", .text)
+                t.column("title", .text).notNull()
+                t.column("artist", .text)
+                t.column("album", .text)
+                t.column("trackNumber", .integer)
+                t.column("year", .integer)
+                t.column("duration", .double).notNull()
+                t.column("sampleRate", .double).notNull()
+                t.column("bitDepth", .integer)
+                t.column("artworkFilePath", .text)
+                t.column("addedAt", .datetime).notNull()
+            }
+            try db.create(table: "playlist") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("title", .text).notNull()
+                t.column("createdAt", .datetime).notNull()
+            }
+            try db.create(table: "playlistTrack") { t in
+                t.column("playlistId", .integer).notNull()
+                    .references("playlist", onDelete: .cascade)
+                t.column("trackRelativePath", .text).notNull()
+                    .references("track", onDelete: .cascade)
+                t.column("position", .integer).notNull()
+                t.primaryKey(["playlistId", "trackRelativePath"])
+            }
+        }
+        m.registerMigration("v2") { db in
+            try db.alter(table: "track") { t in
+                t.add(column: "fileState", .text).notNull().defaults(to: FileState.local.rawValue)
+                t.add(column: "cloudSha", .text)
+            }
+        }
+        m.registerMigration("v3") { db in
+            try db.alter(table: "track") { t in t.add(column: "discNumber", .integer) }
+        }
+        m.registerMigration("v4") { db in
+            try db.alter(table: "track") { t in t.add(column: "discLabel", .text) }
+        }
+        try m.migrate(db)
+        return path
+    }
+
+    @Test func migrationV5AddsTrackKeyPrimaryKeyAndCueColumns() throws {
+        let catalog = try Catalog.inMemory()
+        let columns = try catalog.dbQueue.read { db in
+            try db.columns(in: "track").map(\.name)
+        }
+        #expect(columns.contains("trackKey"))
+        #expect(columns.contains("cueIndex"))
+        #expect(columns.contains("startFrame"))
+        #expect(columns.contains("frameCount"))
+        // PK перекатан на trackKey (SQLite не умеет ALTER PRIMARY KEY)
+        let pk = try catalog.dbQueue.read { db in try db.primaryKey("track").columns }
+        #expect(pk == ["trackKey"])
+    }
+
+    @Test func migrationV5CopiesOldRowsWithTrackKeyEqualToRelativePath() throws {
+        let path = try makeV4Database()
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let addedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        do {
+            let db = try DatabaseQueue(path: path)
+            try db.write { db in
+                try db.execute(sql: """
+                    INSERT INTO track (relativePath, title, duration, sampleRate, addedAt,
+                                       fileState, cloudSha, discNumber, discLabel)
+                    VALUES ('alb/01.flac', 'Первый', 213.5, 44100, ?, 'backedUp', 'sha1', 1, 'CD1')
+                    """, arguments: [addedAt])
+            }
+        }
+
+        // Открываем актуальным Catalog → применяется v5 поверх данных v4.
+        let catalog = try Catalog(path: path)
+        let rec = try catalog.dbQueue.read { db in
+            try TrackRecord.fetchOne(db, key: "alb/01.flac")
+        }
+        #expect(rec?.trackKey == "alb/01.flac")
+        #expect(rec?.relativePath == "alb/01.flac")
+        #expect(rec?.title == "Первый")
+        #expect(rec?.duration == 213.5)
+        #expect(rec?.fileState == FileState.backedUp.rawValue)
+        #expect(rec?.cloudSha == "sha1")
+        #expect(rec?.discNumber == 1)
+        #expect(rec?.discLabel == "CD1")
+        // границы cue у мигрированных обычных треков — NULL
+        #expect(rec?.cueIndex == nil)
+        #expect(rec?.startFrame == nil)
+        #expect(rec?.frameCount == nil)
+    }
+
+    @Test func migrationV5PreservesUserPlaylists() throws {
+        let path = try makeV4Database()
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let addedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        do {
+            let db = try DatabaseQueue(path: path)
+            try db.write { db in
+                try db.execute(sql: """
+                    INSERT INTO track (relativePath, title, duration, sampleRate, addedAt)
+                    VALUES ('a.flac', 'А', 1, 44100, ?)
+                    """, arguments: [addedAt])
+                try db.execute(sql: """
+                    INSERT INTO track (relativePath, title, duration, sampleRate, addedAt)
+                    VALUES ('b.flac', 'Б', 1, 44100, ?)
+                    """, arguments: [addedAt])
+                try db.execute(sql: "INSERT INTO playlist (title, createdAt) VALUES ('Микс', ?)",
+                               arguments: [addedAt])
+                try db.execute(sql: """
+                    INSERT INTO playlistTrack (playlistId, trackRelativePath, position)
+                    VALUES (1, 'a.flac', 0), (1, 'b.flac', 1)
+                    """)
+            }
+        }
+
+        let catalog = try Catalog(path: path)
+        let store = PlaylistStore(catalog: catalog)
+
+        // плейлист и его состав целы; порядок сохранён
+        #expect(try store.allPlaylists().map(\.title) == ["Микс"])
+        let titles = try store.tracks(in: 1, documentsURL: URL(fileURLWithPath: "/docs")).map(\.title)
+        #expect(titles == ["А", "Б"])
+
+        // FK перекатан на track(trackKey): каскад из track всё ещё работает.
+        try CatalogStore(catalog: catalog).deleteTracks(relativePaths: ["a.flac"])
+        let remaining = try catalog.dbQueue.read { db in
+            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM playlistTrack") ?? -1
+        }
+        #expect(remaining == 1)
+    }
+
+    @Test func migrationV5IsIdempotentOnReopen() throws {
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("catalog-v5-idem-\(UUID().uuidString).sqlite").path
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        do {
+            let catalog = try Catalog(path: path)
+            try catalog.dbQueue.write { db in
+                try TrackRecord(relativePath: "alb/CD.flac", title: "Трек 1", duration: 1,
+                                sampleRate: 44100, cueIndex: 1, startFrame: 0,
+                                frameCount: 4_410_000).insert(db)
+            }
+        }
+        // повторное открытие — миграции не падают, cue-строка на месте
+        let reopened = try Catalog(path: path)
+        let rec = try reopened.dbQueue.read { db in
+            try TrackRecord.fetchOne(db, key: "alb/CD.flac#1")
+        }
+        #expect(rec?.startFrame == 0)
+        #expect(rec?.frameCount == 4_410_000)
+    }
+
     // MARK: - Roundtrip TrackRecord
 
     @Test func insertFetchRoundtripPreservesAllFields() throws {

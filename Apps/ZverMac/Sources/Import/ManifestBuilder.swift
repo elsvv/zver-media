@@ -24,6 +24,8 @@ enum ManifestBuilder {
         var sourceFolder: URL
         var artworkFileName: String?
         var playlistFileName: String?
+        /// Пути (относительно `sourceFolder`) файлов-компаньонов `.cue`/`.log`.
+        var extraFileNames: [String]
         var tracks: [TrackSnapshot]
 
         struct TrackSnapshot: Sendable {
@@ -48,8 +50,19 @@ enum ManifestBuilder {
     /// каждого аудиофайла и обложки. Бросает `BuildError.fileUnreadable`, если
     /// файл недоступен (целостность важнее частичного манифеста).
     static func buildAlbum(from snapshot: DraftSnapshot) throws -> ManifestAlbum {
+        // Хеш/размер по УНИКАЛЬНОМУ `relativePath` — считаем ровно один раз. У cue-
+        // образа N логических треков делят один контейнер (`.flac`); хешировать его
+        // на каждый трек = 258 МБ × N (тот самый CPU-kill). Кэш снимает повтор.
+        var hashCache: [String: (sha: String, size: Int)] = [:]
+        func hashAndSizeOnce(relativePath: String, fileURL: URL) throws -> (sha: String, size: Int) {
+            if let cached = hashCache[relativePath] { return cached }
+            let result = try hashAndSize(of: fileURL)
+            hashCache[relativePath] = result
+            return result
+        }
+
         let tracks = try snapshot.tracks.map { track -> ManifestTrack in
-            let (sha, size) = try hashAndSize(of: track.fileURL)
+            let (sha, size) = try hashAndSizeOnce(relativePath: track.relativePath, fileURL: track.fileURL)
             return ManifestTrack(
                 // fileName несёт относительный путь внутри альбома (`CD1/01 - x.flac`),
                 // чтобы структура папок сохранилась на телефоне.
@@ -87,6 +100,15 @@ enum ManifestBuilder {
                 fileName: playlistFileName, sha256: sha, fileSize: size)
         }
 
+        // Extras (`.cue`/`.log`): каждый уникальный файл хешируем один раз.
+        var extras: [ManifestFile] = []
+        var seenExtras: Set<String> = []
+        for fileName in snapshot.extraFileNames where seenExtras.insert(fileName).inserted {
+            let extraURL = snapshot.sourceFolder.appendingPathComponent(fileName)
+            let (sha, size) = try hashAndSize(of: extraURL)
+            extras.append(ManifestFile(fileName: fileName, sha256: sha, fileSize: size))
+        }
+
         return ManifestAlbum(
             id: snapshot.albumId,
             title: snapshot.title,
@@ -94,6 +116,7 @@ enum ManifestBuilder {
             year: snapshot.year,
             artwork: artwork,
             playlist: playlist,
+            extras: extras,
             tracks: tracks
         )
     }

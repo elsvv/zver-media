@@ -276,6 +276,7 @@ private extension AlbumDraft {
             sourceFolder: sourceFolder,
             artworkFileName: artworkFileName,
             playlistFileName: playlistFileName,
+            extraFileNames: extraFileNames,
             tracks: tracks.map { track in
                 ManifestBuilder.DraftSnapshot.TrackSnapshot(
                     fileURL: track.fileURL,

@@ -189,6 +189,15 @@ final class SyncHost {
                     fileSize: playlist.fileSize
                 )
             }
+            // Extras (`.cue`/`.log`) — раздаём по тому же ключу `albumId/fileName`.
+            for extra in album.extras {
+                let key = HostSnapshot.relativePath(albumId: album.id, fileName: extra.fileName)
+                files[key] = HostSnapshot.ServedFile(
+                    url: folder.appendingPathComponent(extra.fileName),
+                    sha256: extra.sha256,
+                    fileSize: extra.fileSize
+                )
+            }
         }
 
         let snapshot = HostSnapshot(

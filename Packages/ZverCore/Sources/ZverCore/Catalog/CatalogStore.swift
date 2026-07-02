@@ -46,17 +46,34 @@ public final class CatalogStore: Sendable {
                 }
             }
             let scannedPaths = Set(scanned.map(\.relativePath))
-            // Кандидаты на удаление — только не-облачные треки, отсутствующие
-            // в скане. Каталог стал источником правды о наличии трека: remote/
-            // backedUp/downloading (или любой с непустым cloudSha) физически
-            // может отсутствовать на диске по дизайну и обязан пережить рескан.
-            let candidates = try TrackRecord
+            let scannedKeys = Set(scanned.map(\.trackKey))
+            // (a) Контейнер целиком пропал из скана (файл удалён) — кандидаты все его
+            // строки. Каталог — источник правды о наличии: remote/backedUp/downloading
+            // (или любой с непустым cloudSha) физически может отсутствовать на диске по
+            // дизайну и обязан пережить рескан. Для cue-альбома в кандидаты попадают все
+            // N строк одного `.flac` разом (пропал файл → в скане нет ни одной его строки).
+            // keepMissing спасает «файл на месте, но не прочитался» (частичная копия).
+            let missing = try TrackRecord
                 .filter(!scannedPaths.contains(Column("relativePath")))
                 .fetchAll(db)
-            let removedPaths = candidates
-                .filter { isPurelyLocal($0) && !keepMissing($0.relativePath) }
-                .map(\.relativePath)
-            try TrackRecord.deleteAll(db, keys: removedPaths)
+            // (b) Контейнер НА МЕСТЕ, но набор его trackKey поменялся — устаревшие строки.
+            // Без этого reconcile их не трогал (relativePath в скане). Главный кейс:
+            // апгрейд, где старый «один гигантский трек» (trackKey == relativePath) на
+            // весь `.flac` остаётся ФАНТОМОМ рядом с новыми N cue-строками
+            // (trackKey == relativePath#i) после прихода `.cue`; либо `.cue` укоротили и
+            // осиротевшие `#k` висят. keepMissing здесь не применяем — контейнер прочитан.
+            let staleInPresent = try TrackRecord
+                .filter(scannedPaths.contains(Column("relativePath")))
+                .filter(!scannedKeys.contains(Column("trackKey")))
+                .fetchAll(db)
+            // Удаляем по trackKey (PK): у cue-строк trackKey != relativePath. Облачные
+            // строки сохраняем всегда (их наличие на диске по дизайну необязательно).
+            let removedKeys = (
+                missing.filter { !keepMissing($0.relativePath) } + staleInPresent
+            )
+            .filter(isPurelyLocal)
+            .map(\.trackKey)
+            try TrackRecord.deleteAll(db, keys: removedKeys)
         }
     }
 
@@ -66,11 +83,15 @@ public final class CatalogStore: Sendable {
     /// downloading}) сохраняются всегда.
     /// Удаляет строки треков по относительным путям (удаление альбома целиком,
     /// в т.ч. облачных `remote`/`backedUp`, которые reconcile сам не трогает).
-    /// Плейлистные связи чистятся каскадом. Пустой список — no-op.
+    /// Ключуется по `relativePath` (контейнеру): для cue-альбома сносит все N
+    /// строк одного `.flac` разом. Плейлистные связи чистятся каскадом. Пустой
+    /// список — no-op.
     public func deleteTracks(relativePaths: [String]) throws {
         guard !relativePaths.isEmpty else { return }
         try catalog.dbQueue.write { db in
-            _ = try TrackRecord.deleteAll(db, keys: relativePaths)
+            _ = try TrackRecord
+                .filter(relativePaths.contains(Column("relativePath")))
+                .deleteAll(db)
         }
     }
 
@@ -110,6 +131,40 @@ public final class CatalogStore: Sendable {
     /// путь — no-op.
     public func markBackedUp(relativePath: String, cloudSha: String) throws {
         try setFileState(relativePath: relativePath, .backedUp, cloudSha: cloudSha)
+    }
+
+    // MARK: - Облачные апдейтеры по контейнеру (лок-степ, cue-альбомы)
+
+    /// Лок-степ облачного состояния: обновляет `fileState` ВСЕХ строк одного
+    /// контейнера (`relativePath`) — единицы облачного состояния cue-альбома, где
+    /// N логических треков делят один `.flac`. Для обычного трека затрагивает
+    /// ровно одну строку. Если `cloudSha` передан — пишет его во все строки,
+    /// иначе колонку `cloudSha` не трогает. Все N строк меняются в одной
+    /// транзакции (остаются синхронными). Несуществующий контейнер — no-op.
+    /// Идемпотентно.
+    public func setFileState(
+        container relativePath: String, _ state: FileState, cloudSha: String? = nil
+    ) throws {
+        try catalog.dbQueue.write { db in
+            if let cloudSha {
+                try db.execute(
+                    sql: "UPDATE track SET fileState = ?, cloudSha = ? WHERE relativePath = ?",
+                    arguments: [state.rawValue, cloudSha, relativePath]
+                )
+            } else {
+                try db.execute(
+                    sql: "UPDATE track SET fileState = ? WHERE relativePath = ?",
+                    arguments: [state.rawValue, relativePath]
+                )
+            }
+        }
+    }
+
+    /// Лок-степ: помечает подтверждёнными в облаке ВСЕ строки контейнера (после
+    /// сверки sha): `fileState = backedUp`, `cloudSha` = переданный, во всех N
+    /// строках одного `.flac`. Идемпотентно. Несуществующий контейнер — no-op.
+    public func markBackedUp(container relativePath: String, cloudSha: String) throws {
+        try setFileState(container: relativePath, .backedUp, cloudSha: cloudSha)
     }
 
     /// Кандидаты на автобэкап: `fileState == local` И `cloudSha IS NULL`

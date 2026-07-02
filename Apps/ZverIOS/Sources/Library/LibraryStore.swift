@@ -180,7 +180,7 @@ final class LibraryStore: ObservableObject {
     /// копию — для них в UI показывается «Удалить»).
     func removeFromDevice(_ groups: [AlbumGroup]) async {
         for group in groups {
-            for track in group.tracks where track.fileState == .backedUp {
+            for track in Self.containerRepresentatives(group.tracks) where track.fileState == .backedUp {
                 _ = await backupService?.offload(track: track)
             }
         }
@@ -190,7 +190,7 @@ final class LibraryStore: ObservableObject {
     /// «Скачать»: возвращает облачные (`remote`) треки альбомов на устройство.
     func downloadAlbums(_ groups: [AlbumGroup]) async {
         for group in groups {
-            for track in group.tracks where track.fileState == .remote {
+            for track in Self.containerRepresentatives(group.tracks) where track.fileState == .remote {
                 _ = await backupService?.download(track: track)
             }
         }
@@ -247,9 +247,22 @@ final class LibraryStore: ObservableObject {
     }
 
     private func deleteCloudCopies(_ group: AlbumGroup) async {
-        for track in group.tracks where track.fileState == .backedUp || track.fileState == .remote {
+        for track in Self.containerRepresentatives(group.tracks)
+        where track.fileState == .backedUp || track.fileState == .remote {
             _ = await backupService?.deleteFromCloud(track: track)
         }
+    }
+
+    /// Дедуп треков по контейнеру (физическому `url` `.flac`): у cue-альбома N
+    /// логических треков делят один файл, а облачная операция (upload/download/
+    /// offload/delete) — это одна физическая передача контейнера. Возвращает по
+    /// одному представителю на уникальный `url` (в исходном порядке), чтобы не
+    /// гонять один и тот же `.flac` N раз. Для обычных треков (у каждого свой файл) —
+    /// no-op. `fileState` у N cue-строк синхронен (лок-степ), поэтому представитель
+    /// корректно отражает состояние всего контейнера.
+    private static func containerRepresentatives(_ tracks: [Track]) -> [Track] {
+        var seen = Set<String>()
+        return tracks.filter { seen.insert($0.url.path).inserted }
     }
 
     /// Сносит папку альбома целиком (если она внутри Documents); иначе — только
@@ -411,6 +424,16 @@ final class LibraryStore: ObservableObject {
                                            documentsURL: URL) -> TrackRecord? {
         guard let relativePath = relativePath(of: info.url, from: documentsURL)
         else { return nil }
+        // Cue-трек — «вырезка» из общего контейнера: длительность у скана осталась
+        // по всему файлу, для трека берём её из числа сэмплов диапазона (по треку
+        // считают слайдер/локскрин/мини-плеер; последний трек — оценка, плеер
+        // уточнит по факту). Обычный трек — длительность файла как есть.
+        let duration: Double
+        if let frameCount = info.frameCount, info.sampleRate > 0 {
+            duration = Double(frameCount) / info.sampleRate
+        } else {
+            duration = info.duration
+        }
         return TrackRecord(
             relativePath: relativePath,
             title: info.title,
@@ -420,12 +443,15 @@ final class LibraryStore: ObservableObject {
             discNumber: info.discNumber,
             discLabel: info.discLabel,
             year: info.year,
-            duration: info.duration,
+            duration: duration,
             sampleRate: info.sampleRate,
             bitDepth: info.bitDepth,
             artworkFilePath: info.artworkFileURL.flatMap {
                 Self.relativePath(of: $0, from: documentsURL)
-            }
+            },
+            cueIndex: info.cueIndex,
+            startFrame: info.startFrame,
+            frameCount: info.frameCount
         )
     }
 

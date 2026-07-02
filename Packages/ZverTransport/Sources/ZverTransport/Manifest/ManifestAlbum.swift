@@ -13,6 +13,13 @@ public struct ManifestAlbum: Codable, Equatable, Sendable {
     /// диски/стороны и порядок. Опционален: у одно-дисковых альбомов его нет.
     /// Старые манифесты без ключа декодируются в nil.
     public var playlist: ManifestFile?
+    /// Файлы-компаньоны релиза сверх обложки/плейлиста: `.cue` (авторитетные
+    /// границы cue-треков) и `.log` (отчёт рипа EAC/XLD). Как `artwork`/`playlist` —
+    /// `{fileName, sha, size}`. У cue-образа N `tracks` делят один `fileName`
+    /// контейнера, а `.cue` едет здесь: телефон при рескане раскрывает образ по
+    /// авторитетным офсетам из `.cue` (в манифест офсеты не кладём — нет дрейфа).
+    /// Старые манифесты без ключа декодируются в пустой массив.
+    public var extras: [ManifestFile]
     public var tracks: [ManifestTrack]
 
     public init(id: String,
@@ -21,6 +28,7 @@ public struct ManifestAlbum: Codable, Equatable, Sendable {
                 year: Int? = nil,
                 artwork: ManifestArtwork? = nil,
                 playlist: ManifestFile? = nil,
+                extras: [ManifestFile] = [],
                 tracks: [ManifestTrack]) {
         self.id = id
         self.title = title
@@ -28,7 +36,26 @@ public struct ManifestAlbum: Codable, Equatable, Sendable {
         self.year = year
         self.artwork = artwork
         self.playlist = playlist
+        self.extras = extras
         self.tracks = tracks
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, title, artist, year, artwork, playlist, extras, tracks
+    }
+
+    /// Обратная совместимость: манифесты, собранные до `extras`, не содержат ключа —
+    /// декодер даёт пустой массив, а не падает (как `playlist`/`artwork` → nil).
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        title = try c.decode(String.self, forKey: .title)
+        artist = try c.decodeIfPresent(String.self, forKey: .artist)
+        year = try c.decodeIfPresent(Int.self, forKey: .year)
+        artwork = try c.decodeIfPresent(ManifestArtwork.self, forKey: .artwork)
+        playlist = try c.decodeIfPresent(ManifestFile.self, forKey: .playlist)
+        extras = try c.decodeIfPresent([ManifestFile].self, forKey: .extras) ?? []
+        tracks = try c.decode([ManifestTrack].self, forKey: .tracks)
     }
 }
 
@@ -97,3 +124,26 @@ public struct ManifestFile: Codable, Equatable, Sendable {
 /// Обложка альбома — частный случай файла-компаньона. Псевдоним ради совместимости
 /// исходников; на wire это тот же объект `{fileName, sha256, fileSize}`.
 public typealias ManifestArtwork = ManifestFile
+
+public extension ManifestAlbum {
+    /// Уникальные физические файлы альбома, раздаваемые по сети: треки (**дедуп по
+    /// `fileName`** — cue-образ делит один контейнер между N логическими треками,
+    /// качаем/храним его один раз), затем обложка, плейлист и `extras` (`.cue`/`.log`).
+    /// Каждый как `{fileName, sha, size}` — общая основа для дельта-плана, локальной
+    /// sha-карты, счётчика файлов и keep-set чистки устаревших файлов на устройстве.
+    /// Порядок стабильный (треки → обложка → плейлист → extras).
+    var servableFiles: [ManifestFile] {
+        var seen: Set<String> = []
+        var files: [ManifestFile] = []
+        func add(_ file: ManifestFile) {
+            if seen.insert(file.fileName).inserted { files.append(file) }
+        }
+        for track in tracks {
+            add(ManifestFile(fileName: track.fileName, sha256: track.sha256, fileSize: track.fileSize))
+        }
+        if let artwork { add(artwork) }
+        if let playlist { add(playlist) }
+        for extra in extras { add(extra) }
+        return files
+    }
+}

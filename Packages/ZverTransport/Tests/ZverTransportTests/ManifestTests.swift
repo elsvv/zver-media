@@ -182,6 +182,91 @@ import Foundation
         #expect(d.fileName == "CD1/01 - Overcome.flac")
     }
 
+    // MARK: - Extras (`.cue`/`.log`)
+
+    @Test func extrasRoundTripInManifestAlbum() throws {
+        let album = ManifestAlbum(
+            id: "A - B (2020)", title: "B", artist: "A", year: 2020,
+            extras: [
+                ManifestFile(fileName: "Album.cue", sha256: "cue", fileSize: 1024),
+                ManifestFile(fileName: "Album.log", sha256: "log", fileSize: 7000),
+            ],
+            tracks: [])
+        let data = try JSONEncoder().encode(album)
+        let decoded = try JSONDecoder().decode(ManifestAlbum.self, from: data)
+        #expect(decoded == album)
+        #expect(decoded.extras.count == 2)
+        #expect(decoded.extras[0] == ManifestFile(fileName: "Album.cue", sha256: "cue", fileSize: 1024))
+        #expect(decoded.extras[1] == ManifestFile(fileName: "Album.log", sha256: "log", fileSize: 7000))
+    }
+
+    @Test func oldAlbumWithoutExtrasDecodesAsEmpty() throws {
+        // Обратная совместимость: манифест, собранный до фичи extras, не содержит
+        // ключа — декодер даёт пустой массив, а не падает и не nil.
+        let json = #"{"id":"A","title":"B","tracks":[]}"#
+        let decoded = try JSONDecoder().decode(ManifestAlbum.self, from: Data(json.utf8))
+        #expect(decoded.extras.isEmpty)
+        #expect(decoded.playlist == nil)
+        #expect(decoded.artwork == nil)
+    }
+
+    @Test func extrasRoundTripThroughFullManifest() throws {
+        // Extras переживают полный round-trip манифеста вместе с прочими полями.
+        var album = sampleManifest().albums[0]
+        album.extras = [ManifestFile(fileName: "CD.cue", sha256: "c", fileSize: 900)]
+        let manifest = SyncManifest(albums: [album])
+        let data = try JSONEncoder().encode(manifest)
+        let decoded = try JSONDecoder().decode(SyncManifest.self, from: data)
+        #expect(decoded == manifest)
+        #expect(decoded.albums[0].extras.count == 1)
+    }
+
+    // MARK: - servableFiles (дедуп треков + extras) — основа keep-set/fileCount
+
+    @Test func servableFilesDedupesCueTracksAndKeepsExtras() {
+        // cue-образ: N логических треков делят один контейнер (`.flac`); плюс `.cue`
+        // и `.log` в extras. servableFiles — контейнер РОВНО один раз + оба extra.
+        let container = "Album.flac"
+        let cueTrack = { (title: String) in
+            ManifestTrack(fileName: container, title: title, duration: 1,
+                          sampleRate: 44100, fileSize: 258_000_000, sha256: "flacsha",
+                          fileExtension: "flac")
+        }
+        let album = ManifestAlbum(
+            id: "A - B (2020)", title: "B",
+            artwork: ManifestArtwork(fileName: "cover.jpg", sha256: "art", fileSize: 500),
+            extras: [
+                ManifestFile(fileName: "Album.cue", sha256: "cue", fileSize: 1024),
+                ManifestFile(fileName: "Album.log", sha256: "log", fileSize: 7000),
+            ],
+            tracks: [cueTrack("One"), cueTrack("Two"), cueTrack("Three")])
+
+        let files = album.servableFiles
+        let names = files.map(\.fileName)
+        // Контейнер один раз, обложка, оба extra — 4 уникальных файла.
+        #expect(names == [container, "cover.jpg", "Album.cue", "Album.log"])
+        // Контейнер несёт sha/size именно контейнера (не затёрт).
+        #expect(files[0].sha256 == "flacsha")
+        #expect(files[0].fileSize == 258_000_000)
+        // keep-set содержит `.cue` и `.log`.
+        #expect(Set(names).isSuperset(of: ["Album.cue", "Album.log"]))
+    }
+
+    @Test func servableFilesForNormalAlbumEqualsTracksPlusCompanions() {
+        // Обычный альбом (без cue/extras): servableFiles = треки + обложка + плейлист.
+        let album = ManifestAlbum(
+            id: "A - B (2020)", title: "B",
+            artwork: ManifestArtwork(fileName: "folder.jpg", sha256: "art", fileSize: 500),
+            playlist: ManifestFile(fileName: "playlist.m3u8", sha256: "pl", fileSize: 300),
+            tracks: [
+                ManifestTrack(fileName: "01.flac", title: "1", duration: 1, sampleRate: 44100,
+                              fileSize: 1, sha256: "t1", fileExtension: "flac"),
+                ManifestTrack(fileName: "02.flac", title: "2", duration: 1, sampleRate: 44100,
+                              fileSize: 1, sha256: "t2", fileExtension: "flac"),
+            ])
+        #expect(album.servableFiles.map(\.fileName) == ["01.flac", "02.flac", "folder.jpg", "playlist.m3u8"])
+    }
+
     @Test func optionalTrackFieldsRoundTripAsNil() throws {
         let track = ManifestTrack(
             fileName: "x.flac", title: "X", artist: nil, album: nil,
