@@ -3,11 +3,12 @@ import Foundation
 /// Чистый роутер путей протокола синка.
 ///
 /// Маппит request-target в `Route`. Эндпоинты: `/manifest`, `/pair`, `/confirm`,
-/// `/album/<albumId>/<fileName>`. Percent-декодирует сегменты `albumId`/`fileName`
-/// и ЖЁСТКО защищает от path traversal: декодированный сегмент не должен содержать
-/// `/`, начинаться с `/`, быть `.`/`..`, пустым/из одних пробелов или содержать
-/// нулевой байт. Любое нарушение → `.notFound` (никаких 4xx-с-намёком, чтобы не
-/// сливать структуру ФС).
+/// `/album/<albumId>/<fileName>`. Percent-декодирует сегменты и ЖЁСТКО защищает от
+/// path traversal. `albumId` не должен содержать `/`; `fileName` МОЖЕТ нести
+/// относительный путь внутри альбома (`CD1/01 - x.flac`, диски-подпапки), но каждый
+/// его компонент валидируется: ни абсолютного пути, ни пустого/`.`/`..`-компонента,
+/// ни нулевого байта. Любое нарушение → `.notFound` (никаких 4xx-с-намёком, чтобы
+/// не сливать структуру ФС).
 public enum HTTPRouter {
     /// Разрешённый маршрут.
     public enum Route: Equatable, Sendable {
@@ -58,9 +59,12 @@ public enum HTTPRouter {
             }
 
         case 3 where rawSegments[0] == "album":
-            // /album/<albumId>/<fileName>
+            // /album/<albumId>/<fileName>. fileName может нести относительный путь
+            // внутри альбома (`CD1/01 - x.flac`), закодированный как ОДИН сегмент
+            // (`%2F` вместо `/`) — поэтому декодируем его как путь, а albumId —
+            // строго (без внутренних `/`).
             guard let albumId = safeDecode(rawSegments[1]),
-                  let fileName = safeDecode(rawSegments[2]) else {
+                  let fileName = safeDecodePath(rawSegments[2]) else {
                 return .notFound
             }
             return .album(id: albumId, fileName: fileName)
@@ -99,6 +103,33 @@ public enum HTTPRouter {
             return nil
         }
 
+        return decoded
+    }
+
+    /// Как `safeDecode`, но ДОПУСКАЕТ внутренние `/` (относительный путь файла
+    /// внутри альбома, напр. `CD1/01 - x.flac`). Traversal по-прежнему исключён:
+    /// абсолютный путь, пустой/`.`/`..`-компонент (в т.ч. `//` и хвостовой `/`) и
+    /// нулевой байт отвергаются. Каждый компонент валидируется отдельно.
+    private static func safeDecodePath(_ segment: String) -> String? {
+        guard let decoded = segment.removingPercentEncoding else {
+            return nil
+        }
+        if decoded.trimmingCharacters(in: .whitespaces).isEmpty {
+            return nil
+        }
+        if decoded.hasPrefix("/") {                // абсолютный путь
+            return nil
+        }
+        if decoded.unicodeScalars.contains(where: { $0 == "\u{0}" }) {
+            return nil
+        }
+        // Покомпонентно: пустой (`//`, хвостовой `/`), `.` или `..` — traversal.
+        let components = decoded.split(separator: "/", omittingEmptySubsequences: false)
+        for component in components {
+            if component.isEmpty || component == "." || component == ".." {
+                return nil
+            }
+        }
         return decoded
     }
 }

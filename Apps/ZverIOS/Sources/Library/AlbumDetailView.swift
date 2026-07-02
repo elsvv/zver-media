@@ -36,7 +36,7 @@ struct AlbumDetailView: View {
                                      fallback: local + 1)
                         }
                     } header: {
-                        Text("Диск \(section.number)")
+                        Text(section.title)
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(.secondary)
                             .textCase(nil)
@@ -77,6 +77,7 @@ struct AlbumDetailView: View {
     /// `group.tracks` (для запуска альбома с правильной позиции) и треки диска.
     private struct DiscRowGroup: Identifiable {
         let number: Int
+        let title: String       // «CD1»/«Side A» из папки/плейлиста, иначе «Диск N»
         let startIndex: Int
         let tracks: [Track]
         var id: Int { number }
@@ -90,6 +91,7 @@ struct AlbumDetailView: View {
         var offset = 0
         for section in group.discSections {
             result.append(DiscRowGroup(number: section.number,
+                                       title: section.title,
                                        startIndex: offset,
                                        tracks: section.tracks))
             offset += section.tracks.count

@@ -8,6 +8,9 @@ public struct AudioFileInfo: Sendable {
     public var trackNumber: Int?
     /// Номер диска (1-based) из тега DISCNUMBER/disc. nil — одно-дисковый.
     public var discNumber: Int?
+    /// Метка диска (`CD1`/`Side A`) — заполняет `LibraryScanner` из папки/плейлиста,
+    /// не из тега файла. nil — метки нет (показываем «Диск N» по номеру).
+    public var discLabel: String? = nil
     public var year: Int?
     public var duration: Double
     public var sampleRate: Double

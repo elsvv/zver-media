@@ -275,10 +275,12 @@ private extension AlbumDraft {
             year: parsedYear,
             sourceFolder: sourceFolder,
             artworkFileName: artworkFileName,
+            playlistFileName: playlistFileName,
             tracks: tracks.map { track in
                 ManifestBuilder.DraftSnapshot.TrackSnapshot(
                     fileURL: track.fileURL,
                     fileName: track.fileName,
+                    relativePath: track.relativePath,
                     fileExtension: track.fileExtension,
                     title: track.title,
                     artist: track.artist,

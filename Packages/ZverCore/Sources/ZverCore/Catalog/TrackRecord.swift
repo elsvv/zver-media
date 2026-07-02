@@ -13,6 +13,8 @@ public struct TrackRecord: Codable, Equatable, Sendable,
     public var trackNumber: Int?
     /// Номер диска (1-based) для много-дисковых альбомов. nil — одно-дисковый.
     public var discNumber: Int?
+    /// Метка диска для отображения (`CD1`, `Side A`). nil — «Диск N» по номеру.
+    public var discLabel: String?
     public var year: Int?
     public var duration: Double
     public var sampleRate: Double
@@ -28,8 +30,8 @@ public struct TrackRecord: Codable, Equatable, Sendable,
 
     public init(relativePath: String, title: String, artist: String? = nil,
                 album: String? = nil, trackNumber: Int? = nil, discNumber: Int? = nil,
-                year: Int? = nil, duration: Double, sampleRate: Double,
-                bitDepth: Int? = nil, artworkFilePath: String? = nil,
+                discLabel: String? = nil, year: Int? = nil, duration: Double,
+                sampleRate: Double, bitDepth: Int? = nil, artworkFilePath: String? = nil,
                 addedAt: Date = Date(),
                 fileState: String = FileState.local.rawValue,
                 cloudSha: String? = nil) {
@@ -39,6 +41,7 @@ public struct TrackRecord: Codable, Equatable, Sendable,
         self.album = album
         self.trackNumber = trackNumber
         self.discNumber = discNumber
+        self.discLabel = discLabel
         self.year = year
         self.duration = duration
         self.sampleRate = sampleRate
@@ -59,6 +62,7 @@ public struct TrackRecord: Codable, Equatable, Sendable,
                   album: track.album,
                   trackNumber: track.trackNumber,
                   discNumber: track.discNumber,
+                  discLabel: track.discLabel,
                   year: track.year,
                   duration: track.duration,
                   sampleRate: track.sampleRate,
@@ -76,6 +80,7 @@ public struct TrackRecord: Codable, Equatable, Sendable,
               album: album,
               trackNumber: trackNumber,
               discNumber: discNumber,
+              discLabel: discLabel,
               year: year,
               duration: duration,
               sampleRate: sampleRate,

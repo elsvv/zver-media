@@ -10,6 +10,7 @@ public struct PlannedFile: Equatable, Sendable {
     public enum Kind: Equatable, Sendable {
         case track
         case artwork
+        case playlist
     }
 
     public var albumId: String
@@ -94,6 +95,20 @@ public enum SyncPlanner {
                         sha256: artwork.sha256,
                         fileSize: artwork.fileSize,
                         kind: .artwork
+                    ))
+                    albumComplete = false
+                }
+            }
+
+            if let playlist = album.playlist {
+                let path = relativePath(albumId: album.id, fileName: playlist.fileName)
+                if localShasByPath[path] != playlist.sha256 {
+                    toFetch.append(PlannedFile(
+                        albumId: album.id,
+                        fileName: playlist.fileName,
+                        sha256: playlist.sha256,
+                        fileSize: playlist.fileSize,
+                        kind: .playlist
                     ))
                     albumComplete = false
                 }

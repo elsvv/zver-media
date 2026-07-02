@@ -8,7 +8,7 @@ import Testing
 /// treки без альбома (orphan) кладутся в общий корень `/music`.
 private func makeTrack(title: String, artist: String? = nil, album: String? = nil,
                        trackNumber: Int? = nil, discNumber: Int? = nil,
-                       folder: String? = nil,
+                       discLabel: String? = nil, folder: String? = nil,
                        sampleRate: Double = 44100, bitDepth: Int? = nil,
                        ext: String = "flac") -> Track {
     let dir = folder ?? album.flatMap { name in
@@ -16,7 +16,7 @@ private func makeTrack(title: String, artist: String? = nil, album: String? = ni
     } ?? "/music"
     return Track(url: URL(fileURLWithPath: "\(dir)/\(title).\(ext)"), title: title,
                  artist: artist, album: album, trackNumber: trackNumber,
-                 discNumber: discNumber,
+                 discNumber: discNumber, discLabel: discLabel,
                  duration: 60, sampleRate: sampleRate, bitDepth: bitDepth)
 }
 
@@ -170,6 +170,44 @@ private func makeTrack(title: String, artist: String? = nil, album: String? = ni
         #expect(sections.map(\.number) == [1, 2])
         #expect(sections[0].tracks.map(\.title) == ["D1T1", "D1T2"])
         #expect(sections[1].tracks.map(\.title) == ["D2T1", "D2T2"])
+    }
+
+    @Test func discSubfoldersFoldIntoOneAlbumViaLabel() {
+        // CD1/CD2 — подпапки-диски: метка диска совпадает с именем папки, поэтому
+        // альбом ОДИН (корень), а не два. Секции показывают метки как есть.
+        let tracks = [
+            makeTrack(title: "T2", album: "Maxinquaye", trackNumber: 1, discNumber: 2,
+                      discLabel: "CD2", folder: "/m/Maxinquaye/CD2"),
+            makeTrack(title: "T1", album: "Maxinquaye", trackNumber: 1, discNumber: 1,
+                      discLabel: "CD1", folder: "/m/Maxinquaye/CD1"),
+            makeTrack(title: "T1b", album: "Maxinquaye", trackNumber: 2, discNumber: 1,
+                      discLabel: "CD1", folder: "/m/Maxinquaye/CD1"),
+        ]
+
+        let groups = AlbumGroup.group(tracks)
+
+        #expect(groups.count == 1)
+        let group = groups[0]
+        #expect(group.id == "/m/Maxinquaye")   // корень, а не /CD1 или /CD2
+        #expect(group.hasMultipleDiscs)
+        #expect(group.discSections.map(\.title) == ["CD1", "CD2"])
+        #expect(group.discSections[0].tracks.map(\.title) == ["T1", "T1b"])
+        #expect(group.discSections[1].tracks.map(\.title) == ["T2"])
+    }
+
+    @Test func tagOnlyDiscsShowNumberedTitlesWithoutClimbing() {
+        // Диски из тега DISCNUMBER без папок (discLabel nil) — группируем по
+        // фактической папке, заголовки «Диск N».
+        let tracks = [
+            makeTrack(title: "A", album: "X", trackNumber: 1, discNumber: 1, folder: "/m/X"),
+            makeTrack(title: "B", album: "X", trackNumber: 1, discNumber: 2, folder: "/m/X"),
+        ]
+
+        let group = AlbumGroup.group(tracks)[0]
+
+        #expect(group.id == "/m/X")
+        #expect(group.hasMultipleDiscs)
+        #expect(group.discSections.map(\.title) == ["Диск 1", "Диск 2"])
     }
 
     @Test func singleDiscAlbumHasOneSectionAndNoHeaders() {

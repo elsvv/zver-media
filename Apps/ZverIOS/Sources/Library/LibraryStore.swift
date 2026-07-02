@@ -272,6 +272,7 @@ final class LibraryStore: ObservableObject {
             album: info.album,
             trackNumber: info.trackNumber,
             discNumber: info.discNumber,
+            discLabel: info.discLabel,
             year: info.year,
             duration: info.duration,
             sampleRate: info.sampleRate,

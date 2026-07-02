@@ -79,6 +79,14 @@ public final class Catalog: Sendable {
             }
         }
 
+        // v4: метка диска (`CD1`/`Side A`) из папки/плейлиста. Аддитивна: NULL у
+        // существующих строк, пока рескан не подхватит структуру папок/плейлист.
+        migrator.registerMigration("v4") { db in
+            try db.alter(table: "track") { t in
+                t.add(column: "discLabel", .text)
+            }
+        }
+
         return migrator
     }
 }

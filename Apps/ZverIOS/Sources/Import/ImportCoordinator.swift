@@ -83,8 +83,20 @@ final class ImportCoordinator: ObservableObject {
                     shas[relativePath(albumId: album.id, fileName: artwork.fileName)] = hash
                 }
             }
+            if let playlist = album.playlist {
+                let url = engine.finalURL(albumId: album.id, fileName: playlist.fileName)
+                if FileManager.default.fileExists(atPath: url.path),
+                   let hash = try? Sha256.hash(fileURL: url) {
+                    shas[relativePath(albumId: album.id, fileName: playlist.fileName)] = hash
+                }
+            }
         }
         return shas
+    }
+
+    /// Число раздаваемых файлов альбома: треки + обложка + плейлист (если есть).
+    private nonisolated static func fileCount(of album: ManifestAlbum) -> Int {
+        album.tracks.count + (album.artwork == nil ? 0 : 1) + (album.playlist == nil ? 0 : 1)
     }
 
     /// Относительный путь раздачи `"<albumId>/<fileName>"` — ключ карты sha,
@@ -108,7 +120,7 @@ final class ImportCoordinator: ObservableObject {
 
         // Заготавливаем состояние UI по всем альбомам манифеста.
         albums = manifest.albums.map { album in
-            let total = album.tracks.count + (album.artwork == nil ? 0 : 1)
+            let total = Self.fileCount(of: album)
             let isComplete = plan.alreadyComplete.contains(album.id)
             return AlbumImport(
                 id: album.id,
@@ -152,7 +164,7 @@ final class ImportCoordinator: ObservableObject {
     /// `confirm`/рескан — на вызывающей стороне (после полной сверки).
     private func importAlbum(_ album: ManifestAlbum, planned: [PlannedFile]) async throws {
         let albumId = album.id
-        let total = album.tracks.count + (album.artwork == nil ? 0 : 1)
+        let total = Self.fileCount(of: album)
 
         // Уже лежащие и сверенные файлы (не в плане) считаем готовыми для прогресса.
         let completedAlready = total - planned.count

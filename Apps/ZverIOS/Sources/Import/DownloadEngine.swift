@@ -61,8 +61,15 @@ struct DownloadEngine {
         }
 
         try ensureDirectory(albumDirectory(albumId: planned.albumId))
+        // fileName может нести подпапку-диск (`CD1/01 - x.flac`) — создаём её под
+        // альбомом, иначе атомарный moveItem в финальный путь упадёт.
+        try ensureDirectory(final.deletingLastPathComponent())
         try ensureDirectory(stagingRoot)
-        let partial = stagingRoot.appendingPathComponent("\(planned.albumId)__\(planned.fileName).partial")
+        // Имя партиала держим ПЛОСКИМ: `/` из относительного пути заменяем, чтобы
+        // не плодить подпапки в staging (и не ловить «нет каталога» при записи).
+        let partialName = "\(planned.albumId)__\(planned.fileName).partial"
+            .replacingOccurrences(of: "/", with: "_")
+        let partial = stagingRoot.appendingPathComponent(partialName)
 
         let expected = Int64(planned.fileSize)
         let reportProgress: @Sendable (Int64) -> Void = { onDisk in

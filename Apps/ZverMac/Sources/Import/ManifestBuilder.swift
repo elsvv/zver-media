@@ -23,11 +23,14 @@ enum ManifestBuilder {
         var year: Int?
         var sourceFolder: URL
         var artworkFileName: String?
+        var playlistFileName: String?
         var tracks: [TrackSnapshot]
 
         struct TrackSnapshot: Sendable {
             var fileURL: URL
             var fileName: String
+            /// Путь относительно корня альбома — едет в манифест как `fileName`.
+            var relativePath: String
             var fileExtension: String
             var title: String
             var artist: String?
@@ -48,7 +51,9 @@ enum ManifestBuilder {
         let tracks = try snapshot.tracks.map { track -> ManifestTrack in
             let (sha, size) = try hashAndSize(of: track.fileURL)
             return ManifestTrack(
-                fileName: track.fileName,
+                // fileName несёт относительный путь внутри альбома (`CD1/01 - x.flac`),
+                // чтобы структура папок сохранилась на телефоне.
+                fileName: track.relativePath,
                 title: track.title,
                 artist: track.artist.nilIfBlank,
                 album: track.album.nilIfBlank,
@@ -73,12 +78,22 @@ enum ManifestBuilder {
                 fileName: artworkFileName, sha256: sha, fileSize: size)
         }
 
+        var playlist: ManifestFile?
+        if let playlistFileName = snapshot.playlistFileName {
+            let playlistURL = snapshot.sourceFolder
+                .appendingPathComponent(playlistFileName)
+            let (sha, size) = try hashAndSize(of: playlistURL)
+            playlist = ManifestFile(
+                fileName: playlistFileName, sha256: sha, fileSize: size)
+        }
+
         return ManifestAlbum(
             id: snapshot.albumId,
             title: snapshot.title,
             artist: snapshot.artist.nilIfBlank,
             year: snapshot.year,
             artwork: artwork,
+            playlist: playlist,
             tracks: tracks
         )
     }
