@@ -66,32 +66,40 @@ final class ImportCoordinator: ObservableObject {
     /// Считает локальные sha по уже лежащим файлам альбомов манифеста (для
     /// дельта-плана). Чтение/хеширование — вне главного потока. Файлы, которых нет,
     /// в карту не попадают (план тогда поставит их на докачку).
+    /// Карта уже лежащих файлов для дельта-плана. Совпадение определяем по РАЗМЕРУ
+    /// (файл существует и его размер == размеру в манифесте), а не хешированием.
+    ///
+    /// Раньше здесь хешировалась ВСЯ локальная библиотека на каждый импорт: SHA-256
+    /// по ~16 ГБ держал CPU ~2.5 минуты, и iOS убивал приложение по CPU-лимиту
+    /// (cpu_resource / EXC_RESOURCE). Файлы пишутся на диск только ПОСЛЕ sha-сверки
+    /// при загрузке, поэтому совпадение размера ⇒ тот же контент; целостность
+    /// докачиваемых файлов по-прежнему подтверждается sha в `fetchFile`. В карту
+    /// кладём sha из манифеста (для совпавших) — `SyncPlanner` увидит равенство и
+    /// пропустит файл без загрузки.
     nonisolated static func computeLocalShas(manifest: SyncManifest, engine: DownloadEngine) -> [String: String] {
-        var shas: [String: String] = [:]
-        for album in manifest.albums {
-            for track in album.tracks {
-                let url = engine.finalURL(albumId: album.id, fileName: track.fileName)
-                if FileManager.default.fileExists(atPath: url.path),
-                   let hash = try? Sha256.hash(fileURL: url) {
-                    shas[relativePath(albumId: album.id, fileName: track.fileName)] = hash
-                }
-            }
-            if let artwork = album.artwork {
-                let url = engine.finalURL(albumId: album.id, fileName: artwork.fileName)
-                if FileManager.default.fileExists(atPath: url.path),
-                   let hash = try? Sha256.hash(fileURL: url) {
-                    shas[relativePath(albumId: album.id, fileName: artwork.fileName)] = hash
-                }
-            }
-            if let playlist = album.playlist {
-                let url = engine.finalURL(albumId: album.id, fileName: playlist.fileName)
-                if FileManager.default.fileExists(atPath: url.path),
-                   let hash = try? Sha256.hash(fileURL: url) {
-                    shas[relativePath(albumId: album.id, fileName: playlist.fileName)] = hash
-                }
+        var matched: [String: String] = [:]
+        func matchIfSizeEqual(albumId: String, fileName: String, size expected: Int, sha: String) {
+            let url = engine.finalURL(albumId: albumId, fileName: fileName)
+            if let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+               size == expected {
+                matched[relativePath(albumId: albumId, fileName: fileName)] = sha
             }
         }
-        return shas
+        for album in manifest.albums {
+            for track in album.tracks {
+                matchIfSizeEqual(albumId: album.id, fileName: track.fileName,
+                                 size: track.fileSize, sha: track.sha256)
+            }
+            if let artwork = album.artwork {
+                matchIfSizeEqual(albumId: album.id, fileName: artwork.fileName,
+                                 size: artwork.fileSize, sha: artwork.sha256)
+            }
+            if let playlist = album.playlist {
+                matchIfSizeEqual(albumId: album.id, fileName: playlist.fileName,
+                                 size: playlist.fileSize, sha: playlist.sha256)
+            }
+        }
+        return matched
     }
 
     /// Число раздаваемых файлов альбома: треки + обложка + плейлист (если есть).
@@ -139,7 +147,6 @@ final class ImportCoordinator: ObservableObject {
             let planned = fetchByAlbum[album.id] ?? []
             do {
                 try await importAlbum(album, planned: planned)
-                await rescan()
                 try await confirm(album.id)
                 setPhase(.done, for: album.id)
             } catch is CancellationError {
@@ -151,6 +158,9 @@ final class ImportCoordinator: ObservableObject {
             }
         }
 
+        // Рескан библиотеки ОДИН раз в конце. Пер-альбомный рескан гонял бы AVAsset
+        // по всем файлам десятки раз — лишний CPU (усугублял CPU-лимит iOS).
+        await rescan()
         phase = anyFailure ? .failed("Не все альбомы импортированы. Повторите попытку.") : .finished
     }
 
