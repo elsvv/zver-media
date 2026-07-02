@@ -20,6 +20,15 @@ public struct AudioFileInfo: Sendable {
     /// Заполняется LibraryScanner только когда нет встроенной (artworkData == nil).
     public var artworkFileURL: URL?
     public var url: URL
+    /// 1-based номер трека внутри cue-шита (image+cue). nil у обычных файлов —
+    /// `url` тогда сам является треком; у cue-трека `url` = контейнер (`.flac`).
+    public var cueIndex: Int? = nil
+    /// Смещение начала логического cue-трека в сэмплах внутри контейнера.
+    /// nil у обычных файлов. `isCueTrack == (startFrame != nil)`.
+    public var startFrame: Int64? = nil
+    /// Длина логического cue-трека в сэмплах. Последний трек считается до конца
+    /// файла (оценка по duration; плеер клампит по реальной длине). nil у обычных.
+    public var frameCount: Int64? = nil
 }
 
 public enum MetadataReader {

@@ -78,33 +78,25 @@ final class ImportCoordinator: ObservableObject {
     /// пропустит файл без загрузки.
     nonisolated static func computeLocalShas(manifest: SyncManifest, engine: DownloadEngine) -> [String: String] {
         var matched: [String: String] = [:]
-        func matchIfSizeEqual(albumId: String, fileName: String, size expected: Int, sha: String) {
-            let url = engine.finalURL(albumId: albumId, fileName: fileName)
-            if let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
-               size == expected {
-                matched[relativePath(albumId: albumId, fileName: fileName)] = sha
-            }
-        }
+        // `servableFiles` дедупит треки по имени (cue-образ делит контейнер) и несёт
+        // extras (`.cue`/`.log`) — карту строим по тем же уникальным файлам, что и
+        // планировщик, иначе N cue-строк дали бы лишние проходы по одному `.flac`.
         for album in manifest.albums {
-            for track in album.tracks {
-                matchIfSizeEqual(albumId: album.id, fileName: track.fileName,
-                                 size: track.fileSize, sha: track.sha256)
-            }
-            if let artwork = album.artwork {
-                matchIfSizeEqual(albumId: album.id, fileName: artwork.fileName,
-                                 size: artwork.fileSize, sha: artwork.sha256)
-            }
-            if let playlist = album.playlist {
-                matchIfSizeEqual(albumId: album.id, fileName: playlist.fileName,
-                                 size: playlist.fileSize, sha: playlist.sha256)
+            for file in album.servableFiles {
+                let url = engine.finalURL(albumId: album.id, fileName: file.fileName)
+                if let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+                   size == file.fileSize {
+                    matched[relativePath(albumId: album.id, fileName: file.fileName)] = file.sha256
+                }
             }
         }
         return matched
     }
 
-    /// Число раздаваемых файлов альбома: треки + обложка + плейлист (если есть).
+    /// Число раздаваемых файлов альбома: уникальные аудиофайлы (дедуп по имени —
+    /// cue-образ делит контейнер) + обложка + плейлист + extras (`.cue`/`.log`).
     private nonisolated static func fileCount(of album: ManifestAlbum) -> Int {
-        album.tracks.count + (album.artwork == nil ? 0 : 1) + (album.playlist == nil ? 0 : 1)
+        album.servableFiles.count
     }
 
     /// Относительный путь раздачи `"<albumId>/<fileName>"` — ключ карты sha,

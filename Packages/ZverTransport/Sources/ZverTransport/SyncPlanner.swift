@@ -11,6 +11,10 @@ public struct PlannedFile: Equatable, Sendable {
         case track
         case artwork
         case playlist
+        /// Файл-компаньон релиза (`.cue`/`.log`): офсеты cue-треков и отчёт рипа.
+        /// Качается по тому же эндпоинту, что трек/обложка; на устройстве кладётся
+        /// рядом с контейнером (воссоздание подпапок как у треков).
+        case extra
     }
 
     public var albumId: String
@@ -62,8 +66,9 @@ public enum SyncPlanner {
     ///
     /// Файл попадает в `toFetch`, если его пути нет локально ИЛИ локальный sha не
     /// совпадает с манифестом (идемпотентность/докачка: совпавшие пропускаются).
-    /// Альбом попадает в `alreadyComplete`, когда ВСЕ его треки и обложка (если
-    /// задана) уже совпадают.
+    /// Аудио дедупится по `fileName` (cue-образ делит контейнер между N треками —
+    /// качаем его один раз). Альбом попадает в `alreadyComplete`, когда ВСЕ его
+    /// уникальные файлы (треки, обложка, плейлист, extras `.cue`/`.log`) совпадают.
     public static func plan(manifest: SyncManifest,
                             localShasByPath: [String: String]) -> SyncPlan {
         var toFetch: [PlannedFile] = []
@@ -72,7 +77,12 @@ public enum SyncPlanner {
         for album in manifest.albums {
             var albumComplete = true
 
+            // Дедуп по `fileName`: у cue-образа N логических треков делят один
+            // контейнер (`.flac`) — планируем/качаем его РОВНО один раз (иначе
+            // 258 МБ ушли бы в план N раз). Совпавшие пропускаются как обычно.
+            var seenAudio: Set<String> = []
             for track in album.tracks {
+                guard seenAudio.insert(track.fileName).inserted else { continue }
                 let path = relativePath(albumId: album.id, fileName: track.fileName)
                 if localShasByPath[path] != track.sha256 {
                     toFetch.append(PlannedFile(
@@ -109,6 +119,22 @@ public enum SyncPlanner {
                         sha256: playlist.sha256,
                         fileSize: playlist.fileSize,
                         kind: .playlist
+                    ))
+                    albumComplete = false
+                }
+            }
+
+            // Extras (`.cue`/`.log`): планируются как отдельные файлы. `.cue` несёт
+            // авторитетные офсеты cue-треков — телефон раскроет образ при рескане.
+            for extra in album.extras {
+                let path = relativePath(albumId: album.id, fileName: extra.fileName)
+                if localShasByPath[path] != extra.sha256 {
+                    toFetch.append(PlannedFile(
+                        albumId: album.id,
+                        fileName: extra.fileName,
+                        sha256: extra.sha256,
+                        fileSize: extra.fileSize,
+                        kind: .extra
                     ))
                     albumComplete = false
                 }

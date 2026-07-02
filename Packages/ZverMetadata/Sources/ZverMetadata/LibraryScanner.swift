@@ -14,6 +14,10 @@ public enum LibraryScanner {
     ]
     private static let artworkExtensions: Set<String> = ["jpg", "jpeg", "png", "webp"]
     private static let playlistExtensions: Set<String> = ["m3u", "m3u8"]
+    /// Расширение cue-шита. Признаётся рядом с плейлистами (лежит в КОРНЕ альбома),
+    /// чтобы `albumRoot`/`FolderFacts` знали про него, а образ (`.flac`+`.cue`)
+    /// раскрывался в треки. В аудио не входит — как трек сам по себе не сканируется.
+    private static let cueExtension = "cue"
 
     /// Рекурсивно обходит директорию, читает метаданные всех аудиофайлов.
     ///
@@ -52,53 +56,140 @@ public enum LibraryScanner {
         }
 
         for url in urls {
-            guard var info = try? await MetadataReader.read(url: url) else { continue }
+            guard let container = try? await MetadataReader.read(url: url) else { continue }
             let parent = url.deletingLastPathComponent().standardizedFileURL
             let root = albumRoot(for: url, scanRoot: scanRoot, facts: facts)
             let album = rootAlbum(root)
             let relPath = relativePath(of: url, under: root)
 
-            // Диск/порядок: плейлист → подпапка → тег DISCNUMBER (уже в info).
-            if let disc = album.discMap[relPath.lowercased()] {
-                info.discLabel = disc.discLabel
-                info.discNumber = disc.discOrdinal
-                info.trackNumber = disc.position   // номер внутри диска
-            } else if parent.path != root.path, let sub = firstPathComponent(relPath) {
-                info.discLabel = sub
-                info.discNumber = album.subfolderOrdinal[sub.lowercased()]
-                // trackNumber остаётся из тега файла
-            }
+            // Образ `.flac`+`.cue` раскрывается в N логических треков (диапазоны
+            // сэмплов); обычный файл остаётся одним. Оверлей (диск/альбом/sidecar/
+            // обложка) применяется к КАЖДОМУ полученному треку. `hasCue` из
+            // (кэшированных) фактов папки — чтобы не листать каталог на файл, если
+            // cue рядом нет (обычные альбомы не платят за поддержку образов).
+            let parentHasCue = facts(parent).hasCue
+            for var info in expandCue(url: url, container: container, hasCue: parentHasCue) {
+                let isCue = info.startFrame != nil
 
-            // Нет тега альбома → имя папки-КОРНЯ (кроме файлов в корне скана).
-            if info.album == nil, root.path != scanRoot.path {
-                info.album = root.lastPathComponent
-            }
+                // Диск/порядок: плейлист → подпапка → тег DISCNUMBER (уже в info).
+                // У cue-трека trackNumber уже = номеру внутри cue — плейлист по
+                // одному контейнеру не переопределяет (у образа плейлиста нет).
+                if !isCue, let disc = album.discMap[relPath.lowercased()] {
+                    info.discLabel = disc.discLabel
+                    info.discNumber = disc.discOrdinal
+                    info.trackNumber = disc.position   // номер внутри диска
+                } else if parent.path != root.path, let sub = firstPathComponent(relPath) {
+                    info.discLabel = sub
+                    info.discNumber = album.subfolderOrdinal[sub.lowercased()]
+                    // trackNumber остаётся из тега файла / cue
+                }
 
-            // Override тегов из sidecar. Ключ — относительный путь внутри альбома
-            // (`CD1/01.flac`); фоллбэк на имя файла — для старых плоских sidecar.
-            // Любое непустое поле побеждает прочитанное выше (в т.ч. плейлист).
-            if let override = album.sidecar?.tracks[relPath]
-                ?? album.sidecar?.tracks[url.lastPathComponent] {
-                if let t = override.title { info.title = t }
-                if let a = override.artist { info.artist = a }
-                if let al = override.album { info.album = al }
-                if let y = override.year { info.year = y }
-                if let n = override.trackNumber { info.trackNumber = n }
-                if let d = override.discNumber { info.discNumber = d }
-                if let dl = override.discLabel { info.discLabel = dl }
-            }
+                // Нет тега альбома → имя папки-КОРНЯ (кроме файлов в корне скана).
+                if info.album == nil, root.path != scanRoot.path {
+                    info.album = root.lastPathComponent
+                }
 
-            // Обложка: sidecar.artworkFileName (относительно корня) побеждает
-            // встроенную; иначе, при отсутствии встроенной, — обложка из корня.
-            if let artworkFileName = album.sidecar?.artworkFileName {
-                info.artworkFileURL = root.appendingPathComponent(artworkFileName)
-            } else if info.artworkData == nil {
-                info.artworkFileURL = album.coverURL
-            }
+                // Override тегов из sidecar. Ключ — относительный путь внутри альбома
+                // (`CD1/01.flac`); фоллбэк на имя файла — для старых плоских sidecar.
+                // Любое непустое поле побеждает прочитанное выше (в т.ч. плейлист).
+                // У cue-треков все N делят один relPath (= контейнер), поэтому
+                // ПОТРЕКОВЫЕ поля (title/artist/trackNumber) НЕ накладываем — иначе
+                // одинаковая правка затёрла бы разные названия из cue; альбомные
+                // (album/year/disc) применяем ко всем N.
+                if let override = album.sidecar?.tracks[relPath]
+                    ?? album.sidecar?.tracks[url.lastPathComponent] {
+                    if !isCue {
+                        if let t = override.title { info.title = t }
+                        if let a = override.artist { info.artist = a }
+                        if let n = override.trackNumber { info.trackNumber = n }
+                    }
+                    if let al = override.album { info.album = al }
+                    if let y = override.year { info.year = y }
+                    if let d = override.discNumber { info.discNumber = d }
+                    if let dl = override.discLabel { info.discLabel = dl }
+                }
 
-            infos.append(info)
+                // Обложка: sidecar.artworkFileName (относительно корня) побеждает
+                // встроенную; иначе, при отсутствии встроенной, — обложка из корня.
+                if let artworkFileName = album.sidecar?.artworkFileName {
+                    info.artworkFileURL = root.appendingPathComponent(artworkFileName)
+                } else if info.artworkData == nil {
+                    info.artworkFileURL = album.coverURL
+                }
+
+                infos.append(info)
+            }
         }
         return infos
+    }
+
+    // MARK: - Раскрытие образа `.flac`+`.cue`
+
+    /// Если рядом с `url` лежит одноимённый `.cue`, ссылающийся ровно на ОДИН
+    /// `FILE` с >1 `TRACK` (image+cue), возвращает N логических треков одного
+    /// контейнера с `cueIndex`/`startFrame`/`frameCount` и title/artist из cue
+    /// (фоллбэк — теги контейнера). Иначе — `[container]` без изменений.
+    ///
+    /// Границы — в сэмплах из `INDEX 01` при `container.sampleRate` (побитово).
+    /// У последнего трека `frameCount = nil` («до конца файла»): плеер доигрывает до
+    /// реальной длины `AVAudioFile.length`, не полагаясь на ОЦЕНОЧНУЮ длительность
+    /// (`kAudioFilePropertyEstimatedDuration` может недооценить и обрезать хвост —
+    /// потеря побитовости). Multi-FILE cue (файл на каждый трек) — НЕ образ, не раскрываем.
+    private static func expandCue(url: URL, container: AudioFileInfo,
+                                  hasCue: Bool) -> [AudioFileInfo] {
+        guard hasCue, container.sampleRate > 0,
+              let cueURL = siblingCueURL(for: url),
+              let content = readText(cueURL) else { return [container] }
+        let cue = CueSheet.parse(from: content)
+        guard cue.isSingleFileImage else { return [container] }
+
+        let sampleRate = container.sampleRate
+        let starts = cue.frameOffsets(sampleRate: sampleRate)
+        let tracks = cue.files[0].tracks
+        guard starts.count == tracks.count, !tracks.isEmpty else { return [container] }
+
+        var result: [AudioFileInfo] = []
+        result.reserveCapacity(tracks.count)
+        for (i, track) in tracks.enumerated() {
+            let start = starts[i]
+            var info = container
+            info.title = track.title ?? container.title
+            info.artist = track.performer ?? container.artist
+            info.trackNumber = track.index
+            info.cueIndex = track.index
+            info.startFrame = start
+            if i + 1 < starts.count {
+                // Не последний трек: точная граница по следующему `INDEX 01`.
+                let count = max(0, starts[i + 1] - start)
+                info.frameCount = count
+                info.duration = Double(count) / sampleRate
+            } else {
+                // Последний трек — до конца файла. `frameCount = nil` (sentinel
+                // «до EOF»): плеер доиграет до реальной `AVAudioFile.length`, а не до
+                // ОЦЕНОЧНОЙ длительности контейнера (может недооценить → обрезка хвоста
+                // = потеря побитовости). `duration` для показа — оценка (минус старт).
+                info.frameCount = nil
+                info.duration = max(0, container.duration - Double(start) / sampleRate)
+            }
+            result.append(info)
+        }
+        return result
+    }
+
+    /// Одноимённый (по базовому имени, регистронезависимо) `.cue` в папке `url`.
+    /// Имя cue совпадает с именем аудиофайла без расширения — стандарт single-file
+    /// рипа (`Album.flac` + `Album.cue`).
+    private static func siblingCueURL(for url: URL) -> URL? {
+        let base = url.deletingPathExtension().lastPathComponent
+        let folder = url.deletingLastPathComponent()
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: folder, includingPropertiesForKeys: nil
+        ) else { return nil }
+        return files.first {
+            $0.pathExtension.lowercased() == cueExtension
+                && $0.deletingPathExtension().lastPathComponent
+                    .caseInsensitiveCompare(base) == .orderedSame
+        }
     }
 
     // MARK: - Корень альбома и его инфо
@@ -107,6 +198,9 @@ public enum LibraryScanner {
     private struct FolderFacts {
         let hasPlaylist: Bool
         let hasCover: Bool
+        /// Рядом лежит `.cue` — слабый признак корня (ниже обложки), чтобы
+        /// single-file образ без обложки всё равно опознался как альбом.
+        let hasCue: Bool
     }
 
     /// Инфо корня альбома: карта дисков из плейлиста (по относительным путям),
@@ -138,16 +232,22 @@ public enum LibraryScanner {
         if let byCover = ancestors.first(where: { facts($0).hasCover }) {
             return byCover
         }
+        // Обложки нет — `.cue` тоже метит корень альбома (single-file образ).
+        // Ниже обложки: у multi-disc обложка в общем корне побеждает cue в CD1.
+        if let byCue = ancestors.first(where: { facts($0).hasCue }) {
+            return byCue
+        }
         return parent
     }
 
     private static func folderFacts(inFolder folder: URL) -> FolderFacts {
         guard let files = try? FileManager.default.contentsOfDirectory(
             at: folder, includingPropertiesForKeys: nil
-        ) else { return FolderFacts(hasPlaylist: false, hasCover: false) }
+        ) else { return FolderFacts(hasPlaylist: false, hasCover: false, hasCue: false) }
         let hasPlaylist = files.contains { playlistExtensions.contains($0.pathExtension.lowercased()) }
         let hasCover = files.contains { artworkExtensions.contains($0.pathExtension.lowercased()) }
-        return FolderFacts(hasPlaylist: hasPlaylist, hasCover: hasCover)
+        let hasCue = files.contains { $0.pathExtension.lowercased() == cueExtension }
+        return FolderFacts(hasPlaylist: hasPlaylist, hasCover: hasCover, hasCue: hasCue)
     }
 
     private static func loadRootAlbum(root: URL) -> RootAlbum {
@@ -215,12 +315,49 @@ public enum LibraryScanner {
     }
 
     /// Текст файла в наиболее вероятной кодировке: UTF-8 (`.m3u8` по стандарту,
-    /// большинство `.m3u`), затем системная определялка, затем Latin-1 (старые `.m3u`).
-    private static func readText(_ url: URL) -> String? {
-        if let s = try? String(contentsOf: url, encoding: .utf8) { return s }
+    /// большинство `.m3u`/`.cue`) → **Shift-JIS ТОЛЬКО при явном японском** → системная
+    /// определялка → Windows-1252 → Latin-1 (старые `.m3u`/западные `.cue`).
+    ///
+    /// Shift-JIS «жадный»: почти любой байтовый поток декодируется без ошибки, поэтому
+    /// западный Latin-1 cue (напр. `Motörhead`: `ö` = 0xF6 — валидный ведущий байт SJIS,
+    /// `r` = 0x72 — валидный хвостовой → одиночный «кандзи») превратился бы в кракозябры.
+    /// Принимаем SJIS лишь если в результате есть СЕРИЯ из ≥2 CJK-символов подряд (см.
+    /// `hasCJKRun`): настоящий японский текст — это последовательности кана/кандзи, а
+    /// случайный Latin-1→SJIS даёт ОДИНОЧНЫЕ кандзи среди ASCII (серии нет). Иначе падаем
+    /// на системную определялку и однобайтовые западные кодировки.
+    /// Internal — для точечного теста декода.
+    static func readText(_ url: URL) -> String? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        // UTF-8 строгий: на невалидных байтах честно возвращает nil.
+        if let s = String(data: data, encoding: .utf8) { return s }
+        // Shift-JIS — только с доказательством японского (иначе жадно портит западные).
+        if let sjis = String(data: data, encoding: .shiftJIS), hasCJKRun(sjis) { return sjis }
+        // Windows-1252 (надмножество Latin-1: акценты + «умные» кавычки) — детерминированно
+        // декодирует западные cue; ПЕРЕД системной определялкой (та ненадёжна на почти-ASCII).
+        if let s = String(data: data, encoding: .windowsCP1252) { return s }
         var used = String.Encoding.utf8
         if let s = try? String(contentsOf: url, usedEncoding: &used) { return s }
-        return try? String(contentsOf: url, encoding: .isoLatin1)
+        return String(data: data, encoding: .isoLatin1)
+    }
+
+    /// Есть ли в строке серия из ≥2 подряд идущих CJK-символов (хирагана/катакана/кандзи)
+    /// — признак настоящего японского текста, а не случайно «успешного» Shift-JIS-декода
+    /// западных байтов (тот даёт одиночные кандзи, окружённые ASCII). Полуширинную
+    /// катакану (0xFF66–0xFF9D) НЕ считаем: в SJIS это однобайтовый диапазон, куда попала
+    /// бы западная пунктуация 0xA1–0xDF (ложные срабатывания).
+    private static func hasCJKRun(_ s: String) -> Bool {
+        var run = 0
+        for scalar in s.unicodeScalars {
+            switch scalar.value {
+            case 0x3040...0x30FF,   // хирагана + (полноширинная) катакана
+                 0x4E00...0x9FFF:   // CJK Unified Ideographs (кандзи)
+                run += 1
+                if run >= 2 { return true }
+            default:
+                run = 0
+            }
+        }
+        return false
     }
 
     private static func artworkFileURL(inFolder folder: URL) -> URL? {

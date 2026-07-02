@@ -34,6 +34,11 @@ final class AlbumDraft: ObservableObject, Identifiable {
     /// на телефон как файл-компаньон и задаёт деление на диски. nil — плейлиста нет.
     @Published var playlistFileName: String?
 
+    /// Пути (относительно `sourceFolder`) файлов-компаньонов релиза — `.cue`/`.log`.
+    /// `.cue` несёт авторитетные границы cue-треков (телефон раскроет образ при
+    /// рескане), `.log` — целостность рипа. Едут на телефон как есть, не правятся.
+    let extraFileNames: [String]
+
     // MARK: Per-track (правится в превью)
 
     @Published var tracks: [TrackDraft]
@@ -44,6 +49,7 @@ final class AlbumDraft: ObservableObject, Identifiable {
          year: String,
          artworkFileName: String?,
          playlistFileName: String? = nil,
+         extraFileNames: [String] = [],
          tracks: [TrackDraft]) {
         self.sourceFolder = sourceFolder
         self.title = title
@@ -51,6 +57,7 @@ final class AlbumDraft: ObservableObject, Identifiable {
         self.year = year
         self.artworkFileName = artworkFileName
         self.playlistFileName = playlistFileName
+        self.extraFileNames = extraFileNames
         self.tracks = tracks
     }
 
@@ -100,6 +107,7 @@ final class AlbumDraft: ObservableObject, Identifiable {
                 relativePath(of: $0, under: folder)
             }
         let playlistFileName = playlistFileName(inRoot: folder)
+        let extraFileNames = extraFileNames(under: folder)
 
         let trackDrafts = sortedInfos.map { TrackDraft(info: $0, albumRoot: folder) }
 
@@ -110,6 +118,7 @@ final class AlbumDraft: ObservableObject, Identifiable {
             year: albumYear.map(String.init) ?? "",
             artworkFileName: artworkFileName,
             playlistFileName: playlistFileName,
+            extraFileNames: extraFileNames,
             tracks: trackDrafts
         )
     }
@@ -155,6 +164,26 @@ final class AlbumDraft: ObservableObject, Identifiable {
             .map(\.lastPathComponent)
             .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
             .first
+    }
+
+    private static let extraExtensions: Set<String> = ["cue", "log"]
+
+    /// Файлы-компаньоны релиза (`.cue`/`.log`) под корнем альбома, РЕКУРСИВНО, с
+    /// путями относительно корня (`Album.cue`, `CD1/Album.cue`) — как треки. Так
+    /// `.cue` приедет на телефон одноимённым братом контейнера (в той же подпапке),
+    /// и сканер раскроет образ. Отсортированы по имени (детерминизм). Едут как есть.
+    private static func extraFileNames(under root: URL) -> [String] {
+        guard let enumerator = FileManager.default.enumerator(
+            at: root, includingPropertiesForKeys: [.isRegularFileKey]
+        ) else { return [] }
+        var names: [String] = []
+        for case let url as URL in enumerator {
+            guard extraExtensions.contains(url.pathExtension.lowercased()),
+                  (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
+            else { continue }
+            names.append(relativePath(of: url, under: root))
+        }
+        return names.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
     }
 
     /// Наиболее частое значение (мода) для вывода album-артиста из тегов треков.
