@@ -184,7 +184,8 @@ struct DownloadEngine {
                 artist: track.artist,
                 album: track.album,
                 year: track.year,
-                trackNumber: track.trackNumber
+                trackNumber: track.trackNumber,
+                discNumber: track.discNumber
             )
         }
         return AlbumSidecar(

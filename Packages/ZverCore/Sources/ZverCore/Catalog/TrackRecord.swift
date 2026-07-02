@@ -11,6 +11,8 @@ public struct TrackRecord: Codable, Equatable, Sendable,
     public var artist: String?
     public var album: String?
     public var trackNumber: Int?
+    /// Номер диска (1-based) для много-дисковых альбомов. nil — одно-дисковый.
+    public var discNumber: Int?
     public var year: Int?
     public var duration: Double
     public var sampleRate: Double
@@ -25,9 +27,10 @@ public struct TrackRecord: Codable, Equatable, Sendable,
     public var cloudSha: String?
 
     public init(relativePath: String, title: String, artist: String? = nil,
-                album: String? = nil, trackNumber: Int? = nil, year: Int? = nil,
-                duration: Double, sampleRate: Double, bitDepth: Int? = nil,
-                artworkFilePath: String? = nil, addedAt: Date = Date(),
+                album: String? = nil, trackNumber: Int? = nil, discNumber: Int? = nil,
+                year: Int? = nil, duration: Double, sampleRate: Double,
+                bitDepth: Int? = nil, artworkFilePath: String? = nil,
+                addedAt: Date = Date(),
                 fileState: String = FileState.local.rawValue,
                 cloudSha: String? = nil) {
         self.relativePath = relativePath
@@ -35,6 +38,7 @@ public struct TrackRecord: Codable, Equatable, Sendable,
         self.artist = artist
         self.album = album
         self.trackNumber = trackNumber
+        self.discNumber = discNumber
         self.year = year
         self.duration = duration
         self.sampleRate = sampleRate
@@ -54,6 +58,7 @@ public struct TrackRecord: Codable, Equatable, Sendable,
                   artist: track.artist,
                   album: track.album,
                   trackNumber: track.trackNumber,
+                  discNumber: track.discNumber,
                   year: track.year,
                   duration: track.duration,
                   sampleRate: track.sampleRate,
@@ -70,6 +75,7 @@ public struct TrackRecord: Codable, Equatable, Sendable,
               artist: artist,
               album: album,
               trackNumber: trackNumber,
+              discNumber: discNumber,
               year: year,
               duration: duration,
               sampleRate: sampleRate,

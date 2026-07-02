@@ -7,6 +7,9 @@ public struct Track: Identifiable, Equatable, Hashable, Sendable {
     public var artist: String?
     public var album: String?
     public var trackNumber: Int?
+    /// Номер диска в много-дисковом альбоме (1-based). nil/1 — одно-дисковый.
+    /// Определяет порядок и деление на секции «Диск N» на экране альбома.
+    public var discNumber: Int?
     public var year: Int?
     public var duration: Double    // секунды
     public var sampleRate: Double  // Гц
@@ -16,15 +19,16 @@ public struct Track: Identifiable, Equatable, Hashable, Sendable {
     public var fileState: FileState   // ярус хранения локально/в облаке (этап 4)
 
     public init(url: URL, title: String, artist: String? = nil, album: String? = nil,
-                trackNumber: Int? = nil, year: Int? = nil, duration: Double,
-                sampleRate: Double, bitDepth: Int? = nil, artworkFileURL: URL? = nil,
-                fileState: FileState = .local) {
+                trackNumber: Int? = nil, discNumber: Int? = nil, year: Int? = nil,
+                duration: Double, sampleRate: Double, bitDepth: Int? = nil,
+                artworkFileURL: URL? = nil, fileState: FileState = .local) {
         self.id = url.path
         self.url = url
         self.title = title
         self.artist = artist
         self.album = album
         self.trackNumber = trackNumber
+        self.discNumber = discNumber
         self.year = year
         self.duration = duration
         self.sampleRate = sampleRate

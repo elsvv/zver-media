@@ -21,6 +21,33 @@ public struct AlbumGroup: Identifiable, Equatable, Sendable {
         self.tracks = tracks
     }
 
+    /// Одна дисковая секция альбома: номер диска и его треки (уже в порядке трека).
+    public struct DiscSection: Identifiable, Equatable, Sendable {
+        public let number: Int          // 1-based; nil-диски нормализованы в 1
+        public let tracks: [Track]
+        public var id: Int { number }
+    }
+
+    /// Треки, разбитые по дискам, в порядке (диск, трек). `tracks` уже
+    /// отсортированы `group`, поэтому диски идут непрерывными отрезками — просто
+    /// склеиваем соседние с одинаковым номером (nil-диск нормализуем в 1).
+    public var discSections: [DiscSection] {
+        var sections: [(number: Int, tracks: [Track])] = []
+        for track in tracks {
+            let disc = track.discNumber ?? 1
+            if var last = sections.last, last.number == disc {
+                last.tracks.append(track)
+                sections[sections.count - 1] = last
+            } else {
+                sections.append((number: disc, tracks: [track]))
+            }
+        }
+        return sections.map { DiscSection(number: $0.number, tracks: $0.tracks) }
+    }
+
+    /// Альбом занимает больше одного диска — показывать заголовки «Диск N».
+    public var hasMultipleDiscs: Bool { discSections.count > 1 }
+
     /// Группирует треки по альбомам-ПАПКАМ: каждая папка (родительский каталог
     /// файлов) — отдельный альбом. Разные папки = разные альбомы, даже при
     /// одинаковом теге ALBUM (поддержка версий/оцифровок). Отображаемое название —
@@ -54,6 +81,12 @@ public struct AlbumGroup: Identifiable, Equatable, Sendable {
 
         func makeGroup(id: String, title: String?, tracks: [Track]) -> AlbumGroup {
             let sorted = tracks.sorted { lhs, rhs in
+                // Диск — старший ключ порядка: без него треки много-дискового
+                // альбома перемешивались бы (диск 2 трек 1 «вклинивался» между
+                // диск 1 трек 1 и 2). nil диск считаем первым (одно-дисковый).
+                let ld = lhs.discNumber ?? 1
+                let rd = rhs.discNumber ?? 1
+                if ld != rd { return ld < rd }
                 switch (lhs.trackNumber, rhs.trackNumber) {
                 case let (l?, r?) where l != r: return l < r
                 case (.some, .none): return true

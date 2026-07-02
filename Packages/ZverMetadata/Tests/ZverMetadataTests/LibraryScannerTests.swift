@@ -172,6 +172,23 @@ import Foundation
         #expect(infos.first?.trackNumber == 7)
     }
 
+    @Test func sidecarDiscNumberOverridesTag() async throws {
+        // Рип без DISCNUMBER, но альбом много-дисковый: правка с Мака задаёт диск.
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        let sub = tmp.appendingPathComponent("Папка")
+        try FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(
+            at: fixture("tagged_16_44.flac"), to: sub.appendingPathComponent("01.flac"))
+        try writeSidecar("""
+        {"version":1,"tracks":{"01.flac":{"discNumber":2}}}
+        """, into: sub)
+
+        let infos = try await LibraryScanner.scan(directory: tmp)
+        #expect(infos.count == 1)
+        #expect(infos.first?.discNumber == 2)
+    }
+
     @Test func sidecarArtworkFileNameWinsOverEmbedded() async throws {
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)

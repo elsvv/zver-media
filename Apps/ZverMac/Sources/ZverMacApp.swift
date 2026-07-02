@@ -284,6 +284,7 @@ private extension AlbumDraft {
                     artist: track.artist,
                     album: title,
                     trackNumber: track.parsedTrackNumber,
+                    discNumber: track.discNumber,
                     year: parsedYear,
                     duration: track.duration,
                     sampleRate: track.sampleRate,

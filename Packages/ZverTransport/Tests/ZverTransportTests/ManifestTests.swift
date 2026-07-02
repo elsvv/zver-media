@@ -131,6 +131,30 @@ import Foundation
         #expect(decoded.albums[0].id == "A - B")
     }
 
+    @Test func discNumberRoundTripsInManifestTrack() throws {
+        let track = ManifestTrack(
+            fileName: "d2t1.flac", title: "T", artist: "A", album: "Al",
+            trackNumber: 1, discNumber: 2, year: 2000, duration: 1.0,
+            sampleRate: 44100, bitDepth: 24, fileSize: 1, sha256: "s",
+            fileExtension: "flac")
+        let data = try JSONEncoder().encode(track)
+        let decoded = try JSONDecoder().decode(ManifestTrack.self, from: data)
+        #expect(decoded.discNumber == 2)
+        #expect(decoded == track)
+    }
+
+    @Test func oldManifestWithoutDiscNumberDecodesAsNil() throws {
+        // Обратная совместимость: манифест, собранный до фичи дисков, не содержит
+        // ключа discNumber — декодер даёт nil, а не падает.
+        let json = """
+        {"fileName":"x.flac","title":"X","duration":1.0,"sampleRate":44100,
+         "fileSize":1,"sha256":"s","fileExtension":"flac"}
+        """
+        let decoded = try JSONDecoder().decode(ManifestTrack.self, from: Data(json.utf8))
+        #expect(decoded.discNumber == nil)
+        #expect(decoded.trackNumber == nil)
+    }
+
     @Test func optionalTrackFieldsRoundTripAsNil() throws {
         let track = ManifestTrack(
             fileName: "x.flac", title: "X", artist: nil, album: nil,
