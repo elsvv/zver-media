@@ -126,7 +126,11 @@ struct ManifestPreviewView: View {
                 List {
                     ForEach(manifest.albums, id: \.id) { album in
                         Section {
-                            ForEach(album.tracks, id: \.fileName) { track in
+                            // По позиции, НЕ по fileName: у cue-образа N логических
+                            // треков делят один контейнер (`.flac`) → одинаковый
+                            // fileName дал бы коллизию id и рендер первого трека во
+                            // всех строках (одинаковые № и название).
+                            ForEach(Array(album.tracks.enumerated()), id: \.offset) { _, track in
                                 trackRow(track)
                             }
                         } header: {

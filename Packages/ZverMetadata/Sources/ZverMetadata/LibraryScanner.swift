@@ -4,6 +4,9 @@ import ImageIO
 public enum LibraryScanner {
     private static let audioExtensions: Set<String> = [
         "flac", "m4a", "mp3", "wav", "aiff", "aif", "opus",
+        // DSD-рип (SACD): Мак сконвертит `.dsf` в FLAC при импорте (`DSDStaging`);
+        // на телефон уходит уже FLAC. На iOS `.dsf` не появляется (не раздаётся).
+        "dsf",
     ]
 
     /// Имена файлов-обложек в порядке убывания приоритета (без учёта регистра).
@@ -54,6 +57,16 @@ public enum LibraryScanner {
             rootAlbumCache[root.path] = a
             return a
         }
+        // Разобранный `.cue` папки (кэш на папку): один `.cue` может ссылаться на
+        // несколько файлов (multi-file — стороны винила/диски), поэтому парсим раз и
+        // сопоставляем каждый аудиофайл его FILE-секции в `expandCue`.
+        var cueCache: [String: CueSheet?] = [:]
+        func folderCue(_ folder: URL) -> CueSheet? {
+            if let cached = cueCache[folder.path] { return cached }
+            let parsed = loadCue(inFolder: folder)
+            cueCache[folder.path] = parsed
+            return parsed
+        }
 
         for url in urls {
             guard let container = try? await MetadataReader.read(url: url) else { continue }
@@ -64,11 +77,11 @@ public enum LibraryScanner {
 
             // Образ `.flac`+`.cue` раскрывается в N логических треков (диапазоны
             // сэмплов); обычный файл остаётся одним. Оверлей (диск/альбом/sidecar/
-            // обложка) применяется к КАЖДОМУ полученному треку. `hasCue` из
-            // (кэшированных) фактов папки — чтобы не листать каталог на файл, если
-            // cue рядом нет (обычные альбомы не платят за поддержку образов).
-            let parentHasCue = facts(parent).hasCue
-            for var info in expandCue(url: url, container: container, hasCue: parentHasCue) {
+            // обложка) применяется к КАЖДОМУ полученному треку. Cue папки берём из
+            // (кэшированного) парсинга — nil, если cue рядом нет (обычные альбомы не
+            // платят за поддержку образов).
+            let cue = folderCue(parent)
+            for var info in expandCue(url: url, container: container, cue: cue) {
                 let isCue = info.startFrame != nil
 
                 // Диск/порядок: плейлист → подпапка → тег DISCNUMBER (уже в info).
@@ -125,28 +138,34 @@ public enum LibraryScanner {
 
     // MARK: - Раскрытие образа `.flac`+`.cue`
 
-    /// Если рядом с `url` лежит одноимённый `.cue`, ссылающийся ровно на ОДИН
-    /// `FILE` с >1 `TRACK` (image+cue), возвращает N логических треков одного
-    /// контейнера с `cueIndex`/`startFrame`/`frameCount` и title/artist из cue
-    /// (фоллбэк — теги контейнера). Иначе — `[container]` без изменений.
+    /// Раскрывает контейнер в N логических треков, если `.cue` папки ссылается на ЭТОТ
+    /// файл (по имени в директиве `FILE`) и делит его на >1 трек. Треки несут
+    /// `cueIndex`/`startFrame`/`frameCount` и title/artist из cue (фоллбэк — теги
+    /// контейнера). Иначе — `[container]` без изменений.
     ///
-    /// Границы — в сэмплах из `INDEX 01` при `container.sampleRate` (побитово).
-    /// У последнего трека `frameCount = nil` («до конца файла»): плеер доигрывает до
-    /// реальной длины `AVAudioFile.length`, не полагаясь на ОЦЕНОЧНУЮ длительность
-    /// (`kAudioFilePropertyEstimatedDuration` может недооценить и обрезать хвост —
-    /// потеря побитовости). Multi-FILE cue (файл на каждый трек) — НЕ образ, не раскрываем.
+    /// Поддерживает и single-file образ (`Album.flac`+`Album.cue`, один `FILE`), и
+    /// **multi-file cue** (винил: `… side 1.flac … side 4.flac` + один `.cue` с 4
+    /// `FILE`; либо CD-диски одним cue) — сопоставление по имени в `FILE`, НЕ по
+    /// совпадению базового имени `.cue`. Границы — в сэмплах из `INDEX 01`,
+    /// ОТНОСИТЕЛЬНО начала ИМЕННО этого файла (каждая сторона — от нуля своего `.flac`).
+    /// Нумерация сквозная через все `FILE` (сторона 2 продолжает сторону 1; устойчиво к
+    /// per-file рестарту номеров в cue). Последний трек файла — до его конца
+    /// (`frameCount = nil`; плеер доигрывает до реальной `AVAudioFile.length`, не
+    /// полагаясь на оценочную длительность → без обрезки побитового хвоста). Файл, не
+    /// упомянутый в cue, или `FILE` с одним `TRACK` (файл = трек) — не раскрываем.
     private static func expandCue(url: URL, container: AudioFileInfo,
-                                  hasCue: Bool) -> [AudioFileInfo] {
-        guard hasCue, container.sampleRate > 0,
-              let cueURL = siblingCueURL(for: url),
-              let content = readText(cueURL) else { return [container] }
-        let cue = CueSheet.parse(from: content)
-        guard cue.isSingleFileImage else { return [container] }
+                                  cue: CueSheet?) -> [AudioFileInfo] {
+        guard let cue, container.sampleRate > 0,
+              let match = cue.file(named: url.lastPathComponent),
+              match.file.tracks.count > 1 else { return [container] }
 
         let sampleRate = container.sampleRate
-        let starts = cue.frameOffsets(sampleRate: sampleRate)
-        let tracks = cue.files[0].tracks
-        guard starts.count == tracks.count, !tracks.isEmpty else { return [container] }
+        let file = match.file
+        let starts = file.frameOffsets(sampleRate: sampleRate)
+        let tracks = file.tracks
+        guard starts.count == tracks.count else { return [container] }
+        // Сквозной офсет нумерации через предыдущие FILE.
+        let offset = cue.trackOffset(beforeFile: match.index)
 
         var result: [AudioFileInfo] = []
         result.reserveCapacity(tracks.count)
@@ -155,19 +174,17 @@ public enum LibraryScanner {
             var info = container
             info.title = track.title ?? container.title
             info.artist = track.performer ?? container.artist
-            info.trackNumber = track.index
-            info.cueIndex = track.index
+            info.trackNumber = offset + i + 1
+            info.cueIndex = offset + i + 1
             info.startFrame = start
             if i + 1 < starts.count {
-                // Не последний трек: точная граница по следующему `INDEX 01`.
+                // Не последний трек ФАЙЛА: точная граница по следующему `INDEX 01`.
                 let count = max(0, starts[i + 1] - start)
                 info.frameCount = count
                 info.duration = Double(count) / sampleRate
             } else {
-                // Последний трек — до конца файла. `frameCount = nil` (sentinel
-                // «до EOF»): плеер доиграет до реальной `AVAudioFile.length`, а не до
-                // ОЦЕНОЧНОЙ длительности контейнера (может недооценить → обрезка хвоста
-                // = потеря побитовости). `duration` для показа — оценка (минус старт).
+                // Последний трек этого файла — до его конца (nil = EOF; побитовый хвост
+                // не режется оценкой). `duration` для показа — оценка (минус старт).
                 info.frameCount = nil
                 info.duration = max(0, container.duration - Double(start) / sampleRate)
             }
@@ -176,20 +193,23 @@ public enum LibraryScanner {
         return result
     }
 
-    /// Одноимённый (по базовому имени, регистронезависимо) `.cue` в папке `url`.
-    /// Имя cue совпадает с именем аудиофайла без расширения — стандарт single-file
-    /// рипа (`Album.flac` + `Album.cue`).
-    private static func siblingCueURL(for url: URL) -> URL? {
-        let base = url.deletingPathExtension().lastPathComponent
-        let folder = url.deletingLastPathComponent()
+    /// Первый `.cue` в папке, распарсенный (кэшируется на папку в `scan`). Один `.cue`
+    /// может ссылаться на несколько аудиофайлов (multi-file) — сопоставление в
+    /// `expandCue` по имени `FILE`. Отсутствие/пустой/нечитаемый — nil.
+    private static func loadCue(inFolder folder: URL) -> CueSheet? {
         guard let files = try? FileManager.default.contentsOfDirectory(
             at: folder, includingPropertiesForKeys: nil
         ) else { return nil }
-        return files.first {
-            $0.pathExtension.lowercased() == cueExtension
-                && $0.deletingPathExtension().lastPathComponent
-                    .caseInsensitiveCompare(base) == .orderedSame
+        for cueURL in files
+            .filter({ $0.pathExtension.lowercased() == cueExtension })
+            .sorted(by: { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending })
+        {
+            if let content = readText(cueURL) {
+                let cue = CueSheet.parse(from: content)
+                if !cue.files.isEmpty { return cue }
+            }
         }
+        return nil
     }
 
     // MARK: - Корень альбома и его инфо

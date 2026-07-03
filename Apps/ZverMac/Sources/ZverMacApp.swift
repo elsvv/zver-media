@@ -23,12 +23,24 @@ struct ZverMacApp: App {
 
     init() {
         let queue = OutgoingQueue()
+        // Память о доставленных альбомах: на confirm телефон помечает альбом здесь,
+        // и стартовая автоочередь его больше не возвращает (иначе синкнутые альбомы
+        // всплывали бы в очереди на КАЖДОМ запуске).
+        let delivered = DeliveredStore()
         _queue = StateObject(wrappedValue: queue)
-        _server = StateObject(wrappedValue: ServerCoordinator(queue: queue))
+        _server = StateObject(wrappedValue: ServerCoordinator(queue: queue, delivered: delivered))
         // Программный автосинк: после старта читаем ~/.zver-autoqueue (список папок-
-        // альбомов, по строке на путь) и ставим их в очередь без drag-drop —
-        // «агент кладёт список → музыка в очереди, на телефоне один тап Импорт».
-        ZverAppDelegate.onLaunch = { MacEnqueue.runStartupAutoqueue(queue: queue) }
+        // альбомов, по строке на путь) и ставим в очередь ТОЛЬКО не-доставленные —
+        // «агент кладёт список → новая музыка в очереди, на телефоне один тап Импорт».
+        ZverAppDelegate.onLaunch = {
+            Task { @MainActor in
+                // Осиротевший с прошлой сессии staging (очередь в памяти пуста —
+                // раздавать нечего) чистим ДО автоочереди, чтобы не гонки: она сама
+                // пере-материализует нужные DSD-альбомы.
+                await Task.detached(priority: .utility) { DSDStaging.sweepAll() }.value
+                MacEnqueue.runStartupAutoqueue(queue: queue, delivered: delivered)
+            }
+        }
     }
 
     var body: some Scene {
@@ -102,10 +114,40 @@ private struct ImportWindow: View {
     /// черновик остаётся для повторной попытки.
     private func enqueue(draft: AlbumDraft) async -> String? {
         let snapshot = draft.snapshot()
+        let keyFolder = draft.sourceFolder   // оригинал для учёта доставки
+
+        // DSD-альбом: сконвертировать `.dsf` → FLAC в staging ДО сборки манифеста.
+        // Прогресс капаем в черновик (футер превью), исходную папку не трогаем.
+        let prepared: ManifestBuilder.DraftSnapshot
+        if DSDStaging.containsDSD(snapshot) {
+            guard let ffmpeg = FFmpegLocator.find() else {
+                return "Не найден ffmpeg (нужен для DSD). Установите: brew install ffmpeg"
+            }
+            let quality = draft.dsdQuality
+            let total = snapshot.tracks.filter { $0.fileExtension == "dsf" }.count
+            let generation = draft.beginConversion(total: total)
+            do {
+                prepared = try await Task.detached(priority: .userInitiated) {
+                    try DSDStaging.materialize(snapshot, quality: quality, ffmpeg: ffmpeg) { done, total in
+                        Task { @MainActor in
+                            draft.reportConversion(done: done, total: total, generation: generation)
+                        }
+                    }
+                }.value
+            } catch {
+                draft.endConversion()
+                return (error as? LocalizedError)?.errorDescription
+                    ?? "Не удалось сконвертировать DSD в FLAC."
+            }
+            draft.endConversion()
+        } else {
+            prepared = snapshot
+        }
+
         let album = await Task.detached(priority: .userInitiated) {
             () -> QueuedAlbum.BuildResult in
             do {
-                let manifestAlbum = try ManifestBuilder.buildAlbum(from: snapshot)
+                let manifestAlbum = try ManifestBuilder.buildAlbum(from: prepared)
                 return .success(manifestAlbum)
             } catch {
                 return .failure("Не удалось подготовить альбом к отправке.")
@@ -116,7 +158,8 @@ private struct ImportWindow: View {
         case .success(let manifestAlbum):
             queue.enqueue(QueuedAlbum(
                 manifestAlbum: manifestAlbum,
-                sourceFolder: snapshot.sourceFolder
+                sourceFolder: prepared.sourceFolder,
+                deliveredKeyFolder: keyFolder
             ))
             dropController.clear()
             return nil
@@ -226,31 +269,91 @@ private struct MenuBarContent: View {
 /// манифест (хеширование вне главного потока) → очередь.
 enum MacEnqueue {
     @MainActor
-    static func enqueueFolder(_ folder: URL, into queue: OutgoingQueue) async {
+    static func enqueueFolder(_ folder: URL, into queue: OutgoingQueue, delivered: DeliveredStore) async {
+        // Уже доставлен на телефон и содержимое не менялось — пропускаем целиком: не
+        // сканируем, не хешируем, не ставим в очередь. Отпечаток (только stat) считаем
+        // вне MainActor. Поменяли исходники → отпечаток другой → альбом пере-ставится.
+        let fingerprint = await Task.detached(priority: .utility) {
+            DeliveredStore.fingerprint(of: folder)
+        }.value
+        if delivered.isDelivered(folder: folder, fingerprint: fingerprint) { return }
+
         guard let infos = try? await LibraryScanner.scan(directory: folder), !infos.isEmpty else { return }
         let draft = AlbumDraft.from(folder: folder, infos: infos)
         let snapshot = draft.snapshot()
-        let album = await Task.detached(priority: .utility) { () -> ManifestAlbum? in
-            try? ManifestBuilder.buildAlbum(from: snapshot)
+        let quality = draft.dsdQuality
+        // Собираем манифест вне главного потока. Для DSD сначала конвертируем в FLAC
+        // (staging) — тогда папка-раздачи = staging; без ffmpeg молча пропускаем
+        // (автоочередь — best-effort). Возвращаем и альбом, и папку-раздачи.
+        let built = await Task.detached(priority: .utility) {
+            () -> (album: ManifestAlbum, sourceFolder: URL)? in
+            let prepared: ManifestBuilder.DraftSnapshot
+            if DSDStaging.containsDSD(snapshot) {
+                guard let ffmpeg = FFmpegLocator.find(),
+                      let staged = try? DSDStaging.materialize(snapshot, quality: quality, ffmpeg: ffmpeg)
+                else { return nil }
+                prepared = staged
+            } else {
+                prepared = snapshot
+            }
+            guard let album = try? ManifestBuilder.buildAlbum(from: prepared) else { return nil }
+            return (album, prepared.sourceFolder)
         }.value
-        guard let album else { return }
+        guard let built else { return }
         // Идемпотентно: не дублируем альбом, уже стоящий в очереди (по albumId).
-        if !queue.albums.contains(where: { $0.id == album.id }) {
-            queue.enqueue(QueuedAlbum(manifestAlbum: album, sourceFolder: snapshot.sourceFolder))
+        // Учёт доставки — по оригиналу (`folder`), даже если раздаём из staging.
+        if !queue.albums.contains(where: { $0.id == built.album.id }) {
+            queue.enqueue(QueuedAlbum(manifestAlbum: built.album,
+                                      sourceFolder: built.sourceFolder,
+                                      deliveredKeyFolder: folder))
         }
+    }
+
+    /// Путь файла автоочереди (`~/.zver-autoqueue`): по строке на папку-альбом.
+    static var autoqueuePath: String {
+        NSString(string: "~/.zver-autoqueue").expandingTildeInPath
+    }
+
+    /// Канонический путь папки (устойчив к `..`/симлинкам/хвостовому слэшу) — как
+    /// ключ `DeliveredStore`, чтобы сравнение строк автоочереди было надёжным.
+    static func canonicalPath(_ folder: URL) -> String {
+        folder.standardizedFileURL.resolvingSymlinksInPath().path
+    }
+
+    /// Убирает папку из `~/.zver-autoqueue` (по каноническому пути). Зовётся, когда
+    /// телефон ПОДТВЕРДИЛ доставку: доставленный альбом физически исчезает из списка-
+    /// источника и больше НИКОГДА не всплывёт в очереди при следующих запусках —
+    /// независимо от отпечатка/mtime. Это и есть гарантия «синканул → пропало».
+    /// Не найдено (ручной дроп) — no-op. Атомарная перезапись файла.
+    static func removeFromAutoqueue(folder: URL) {
+        let path = autoqueuePath
+        guard let content = try? String(contentsOfFile: path, encoding: .utf8) else { return }
+        let newContent = autoqueueContent(content, removing: folder)
+        guard newContent != content else { return }
+        try? newContent.write(toFile: path, atomically: true, encoding: .utf8)
+    }
+
+    /// Чистая логика удаления: возвращает содержимое `~/.zver-autoqueue` без строк,
+    /// чей канонический путь совпадает с `folder` (пустые строки тоже отсеиваются).
+    /// Вынесена из ``removeFromAutoqueue(folder:)`` для юнит-тестов без ФС.
+    static func autoqueueContent(_ content: String, removing folder: URL) -> String {
+        let target = canonicalPath(folder)
+        let kept = content.split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && canonicalPath(URL(fileURLWithPath: $0)) != target }
+        return kept.isEmpty ? "" : kept.joined(separator: "\n") + "\n"
     }
 
     /// Читает список папок из `~/.zver-autoqueue` (по строке на путь) и ставит их
     /// в очередь по очереди. Nonisolated-обёртка, кидающая работу на `@MainActor`.
-    static func runStartupAutoqueue(queue: OutgoingQueue) {
+    static func runStartupAutoqueue(queue: OutgoingQueue, delivered: DeliveredStore) {
         Task { @MainActor in
-            let path = NSString(string: "~/.zver-autoqueue").expandingTildeInPath
-            guard let list = try? String(contentsOfFile: path, encoding: .utf8) else { return }
+            guard let list = try? String(contentsOfFile: autoqueuePath, encoding: .utf8) else { return }
             let folders = list.split(whereSeparator: \.isNewline)
                 .map { $0.trimmingCharacters(in: .whitespaces) }
                 .filter { !$0.isEmpty }
             for p in folders {
-                await enqueueFolder(URL(fileURLWithPath: p), into: queue)
+                await enqueueFolder(URL(fileURLWithPath: p), into: queue, delivered: delivered)
             }
         }
     }

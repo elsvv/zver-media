@@ -28,13 +28,21 @@ final class QueuedAlbum: ObservableObject, Identifiable {
 
     let id: String              // albumId протокола (стабильный)
     let manifestAlbum: ManifestAlbum
+    /// Папка, ИЗ КОТОРОЙ раздаются файлы. Для обычного альбома = дропнутая папка;
+    /// для DSD = app-managed staging с готовыми FLAC (см. `DSDStaging`).
     let sourceFolder: URL
+    /// Папка для учёта доставки (`DeliveredStore`) — всегда ОРИГИНАЛ, дропнутый
+    /// пользователем. У DSD `sourceFolder` (staging) ≠ оригинала, поэтому дедуп
+    /// автоочереди должен опираться на неизменный источник, а не на staging.
+    let deliveredKeyFolder: URL
     @Published var status: Status
 
-    init(manifestAlbum: ManifestAlbum, sourceFolder: URL, status: Status = .waiting) {
+    init(manifestAlbum: ManifestAlbum, sourceFolder: URL,
+         deliveredKeyFolder: URL? = nil, status: Status = .waiting) {
         self.id = manifestAlbum.id
         self.manifestAlbum = manifestAlbum
         self.sourceFolder = sourceFolder
+        self.deliveredKeyFolder = deliveredKeyFolder ?? sourceFolder
         self.status = status
     }
 }

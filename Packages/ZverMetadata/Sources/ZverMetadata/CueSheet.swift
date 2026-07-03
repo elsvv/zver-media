@@ -26,6 +26,13 @@ public struct CueFile: Equatable, Sendable {
         self.fileName = fileName
         self.tracks = tracks
     }
+
+    /// Старт каждого трека ЭТОГО файла в сэмплах: `round(frames75/75 · sampleRate)`.
+    /// Офсеты ОТНОСИТЕЛЬНЫ началу этого `.flac` — для multi-file cue (винил: стороны;
+    /// CD-диски) каждая сторона считается от нуля СВОЕГО файла.
+    public func frameOffsets(sampleRate: Double) -> [Int64] {
+        tracks.map { Int64((Double($0.startFrames75) / 75.0 * sampleRate).rounded()) }
+    }
 }
 
 /// Чистый разбор cue-шита (`.cue`): границы треков внутри одного непрерывного
@@ -52,18 +59,31 @@ public struct CueSheet: Equatable, Sendable {
     }
 
     /// Образ (image+cue): ровно один `FILE` с более чем одним `TRACK`.
-    /// Только такой cue раскрываем в N логических треков одного контейнера.
     public var isSingleFileImage: Bool {
         files.count == 1 && files[0].tracks.count > 1
     }
 
-    /// Старт каждого трека ПЕРВОГО `FILE` в сэмплах: `round(frames75/75 · sampleRate)`.
-    /// Границы образа берём из этого файла; для multi-FILE (не образ) не применимо.
+    /// `FILE`-запись, чьё имя (регистронезависимо) совпадает с `fileName`, и её индекс
+    /// среди `files` — для сквозной нумерации. Сопоставляет конкретный `.flac` его
+    /// секции в cue (в т.ч. multi-file: каждая сторона/диск — свой `FILE`). nil — файла
+    /// нет в cue.
+    public func file(named fileName: String) -> (index: Int, file: CueFile)? {
+        guard let index = files.firstIndex(where: {
+            $0.fileName.caseInsensitiveCompare(fileName) == .orderedSame
+        }) else { return nil }
+        return (index, files[index])
+    }
+
+    /// Сколько треков во всех `FILE` ДО индекса `fileIndex` — сквозной офсет нумерации
+    /// (сторона 2 продолжает нумерацию стороны 1), не полагаясь на номера `TRACK` в cue.
+    public func trackOffset(beforeFile fileIndex: Int) -> Int {
+        files[..<min(fileIndex, files.count)].reduce(0) { $0 + $1.tracks.count }
+    }
+
+    /// Старт каждого трека ПЕРВОГО `FILE` в сэмплах. Для multi-file используйте
+    /// `CueFile.frameOffsets(sampleRate:)` по конкретному файлу.
     public func frameOffsets(sampleRate: Double) -> [Int64] {
-        guard let file = files.first else { return [] }
-        return file.tracks.map {
-            Int64((Double($0.startFrames75) / 75.0 * sampleRate).rounded())
-        }
+        files.first?.frameOffsets(sampleRate: sampleRate) ?? []
     }
 
     // MARK: - Разбор

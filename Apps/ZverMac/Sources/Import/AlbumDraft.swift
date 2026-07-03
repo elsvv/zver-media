@@ -43,6 +43,41 @@ final class AlbumDraft: ObservableObject, Identifiable {
 
     @Published var tracks: [TrackDraft]
 
+    /// Целевое качество конвертации DSD → FLAC (только для DSD-альбомов; выбирается
+    /// в превью). У обычных альбомов игнорируется.
+    @Published var dsdQuality: DSDQuality = .default
+
+    /// Прогресс конвертации DSD во время постановки в очередь (готово/всего), либо
+    /// nil, если конвертация не идёт. Показывается в футере превью.
+    @Published private(set) var conversionProgress: ConversionProgress?
+
+    /// Поколение конвертации: `endConversion` его двигает, поэтому «поздние»
+    /// фоновые прогресс-хопы (запланированные до завершения, но выполнившиеся после
+    /// сброса) со старым поколением игнорируются и не воскрешают «N/N» после конца.
+    private var conversionGeneration = 0
+
+    /// Начинает конвертацию: сбрасывает прогресс в 0/total и возвращает поколение.
+    func beginConversion(total: Int) -> Int {
+        conversionGeneration += 1
+        conversionProgress = ConversionProgress(done: 0, total: total)
+        return conversionGeneration
+    }
+
+    /// Обновляет прогресс, только если поколение актуально (иначе — поздний хоп).
+    func reportConversion(done: Int, total: Int, generation: Int) {
+        guard generation == conversionGeneration else { return }
+        conversionProgress = ConversionProgress(done: done, total: total)
+    }
+
+    /// Завершает конвертацию: двигает поколение (гасит поздние хопы) и чистит прогресс.
+    func endConversion() {
+        conversionGeneration += 1
+        conversionProgress = nil
+    }
+
+    /// Есть ли в альбоме DSD-треки (`.dsf`) — тогда показываем пикер качества.
+    var hasDSD: Bool { tracks.contains { $0.isDSD } }
+
     init(sourceFolder: URL,
          title: String,
          artist: String,
@@ -195,16 +230,33 @@ final class AlbumDraft: ObservableObject, Identifiable {
     }
 }
 
+/// Прогресс конвертации DSD → FLAC при постановке альбома в очередь.
+struct ConversionProgress: Equatable {
+    var done: Int
+    var total: Int
+}
+
 /// Редактируемый трек внутри `AlbumDraft`.
 ///
 /// Правятся `title`/`artist`/`trackNumber`; технические поля (длительность,
 /// частота, разрядность, размер, расширение) берутся из скана и не редактируются.
 /// `fileURL` — исходный файл, который будет раздан как есть.
 struct TrackDraft: Identifiable, Sendable {
-    /// Стабильный id для `ForEach` — путь исходного файла.
-    var id: String { fileURL.path }
+    /// Стабильный id для `ForEach`. У обычного трека — путь исходного файла; у
+    /// cue-образа N логических треков делят ОДИН контейнер `.flac`, поэтому в id
+    /// входит `cueIndex` — иначе одинаковый id даёт коллизию в `ForEach` (SwiftUI
+    /// рендерит первую строку для всех: одинаковые название/номер во всех треках).
+    var id: String {
+        cueIndex.map { "\(fileURL.path)#\($0)" } ?? fileURL.path
+    }
 
     let fileURL: URL
+    /// Номер cue-трека (1-based) внутри контейнера (image+cue); nil у обычных треков.
+    /// Различает логические треки, делящие один физический `.flac`.
+    let cueIndex: Int?
+    /// Источник — DSD (`.dsf`): при постановке в очередь Мак сконвертит его в FLAC.
+    /// `sampleRate` тут — частота DSD (для метки «DSD64» в превью).
+    let isDSD: Bool
 
     // Правятся в превью.
     var title: String
@@ -237,6 +289,8 @@ struct TrackDraft: Identifiable, Sendable {
 
     init(info: AudioFileInfo, albumRoot: URL) {
         self.fileURL = info.url
+        self.cueIndex = info.cueIndex
+        self.isDSD = info.isDSD
         self.title = info.title
         self.artist = info.artist ?? ""
         self.trackNumber = info.trackNumber.map(String.init) ?? ""
