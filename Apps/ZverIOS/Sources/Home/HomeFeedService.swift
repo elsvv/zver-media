@@ -433,6 +433,29 @@ final class HomeFeedService: ObservableObject {
         likedKeys = await library.likedRecommendationKeys()
     }
 
+    /// Точные ссылки «Открыть в…» через Odesli (этап 2, по тапу): сначала
+    /// кэш из памяти рекомендаций (повторное открытие шита — без сети),
+    /// промах — ОДИН запрос с таймаутом; успех (включая честное «нигде
+    /// больше нет») кэшируется, ошибка/таймаут — nil БЕЗ кэширования:
+    /// шит остаётся на поисковых URL, следующий тап попробует снова.
+    func songLinks(for suggestion: ExternalSuggestion) async -> SongLinks? {
+        // Без Apple Music-URL (кандидат не проходил валидацию — старый кэш
+        // ленты) Odesli спросить не о чем.
+        guard let appleMusicURL = suggestion.appleMusicURL else { return nil }
+        let key = normKey(of: suggestion)
+        if let json = await library.cachedRecommendationLinks(normKey: key),
+           let cached = try? JSONDecoder().decode(SongLinks.self, from: Data(json.utf8)) {
+            return cached
+        }
+        guard let links = try? await SongLinkClient().links(appleMusicURL: appleMusicURL)
+        else { return nil }
+        if let data = try? JSONEncoder().encode(links),
+           let json = String(data: data, encoding: .utf8) {
+            await library.cacheRecommendationLinks(normKey: key, json: json)
+        }
+        return links
+    }
+
     private func normKey(of suggestion: ExternalSuggestion) -> String {
         suggestion.normKey
             ?? ReleaseNorm.key(artist: suggestion.artist, album: suggestion.album)

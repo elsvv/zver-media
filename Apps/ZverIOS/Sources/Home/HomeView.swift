@@ -332,6 +332,10 @@ struct ExternalSuggestionSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
     @State private var artwork: UIImage?
+    /// Точные ссылки Odesli (этап 2): подъезжают асинхронно после открытия
+    /// (кэш — мгновенно, сеть — один запрос с таймаутом); пока их нет,
+    /// кнопки работают поисковыми URL — шит никогда не ждёт сеть.
+    @State private var songLinks: SongLinks?
 
     private var liked: Bool { feedService.isLiked(suggestion) }
 
@@ -383,7 +387,10 @@ struct ExternalSuggestionSheet: View {
         }
         .presentationDetents([.medium, .large])
         .task(id: suggestion.id) {
-            artwork = await ITunesCatalog.shared.artwork(for: suggestion)
+            async let art = ITunesCatalog.shared.artwork(for: suggestion)
+            async let links = feedService.songLinks(for: suggestion)
+            artwork = await art
+            songLinks = await links
         }
     }
 
@@ -441,8 +448,14 @@ struct ExternalSuggestionSheet: View {
     // MARK: - «Открыть в…»
 
     /// Apple Music — прямой `collectionViewUrl` (есть только у прошедших
-    /// валидацию); Яндекс.Музыка / Bandcamp / YouTube — поисковые URL
-    /// (`ExternalLinks`, без сети и ключей). Точные ссылки Odesli — этап 2.
+    /// валидацию); Яндекс.Музыка / Bandcamp — точные ссылки Odesli, когда
+    /// подъехали (иконка меняется на link), иначе поисковые URL
+    /// (`ExternalLinks`, без сети и ключей); YouTube — всегда поиск.
+    /// Tidal/Deezer — бонусные кнопки, только с точной ссылкой.
+    // TODO: мост к импорту — кнопка «Найти на Bandcamp», открывающая
+    // Bandcamp-экран вкладки «Импорт» с поисковым URL. Зависит от параллельной
+    // ветки feat/external-import — см. docs/plans/2026-07-07-discovery-v2-design.md
+    // («Этап 2 — мост к импорту»).
     private var openInSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Открыть в…")
@@ -456,17 +469,34 @@ struct ExternalSuggestionSheet: View {
                     openButton("Apple Music", systemImage: "applelogo",
                                url: appleMusic)
                 }
-                openButton("Яндекс.Музыка", systemImage: "magnifyingglass",
-                           url: ExternalLinks.yandexMusic(artist: suggestion.artist,
-                                                          album: suggestion.album))
-                openButton("Bandcamp", systemImage: "magnifyingglass",
-                           url: ExternalLinks.bandcamp(artist: suggestion.artist,
-                                                       album: suggestion.album))
+                linkedButton("Яндекс.Музыка", exact: songLinks?.yandex,
+                             search: ExternalLinks.yandexMusic(artist: suggestion.artist,
+                                                               album: suggestion.album))
+                linkedButton("Bandcamp", exact: songLinks?.bandcamp,
+                             search: ExternalLinks.bandcamp(artist: suggestion.artist,
+                                                            album: suggestion.album))
                 openButton("YouTube", systemImage: "magnifyingglass",
                            url: ExternalLinks.youtube(artist: suggestion.artist,
                                                       album: suggestion.album))
+                if let tidal = songLinks?.tidal.flatMap(URL.init(string:)) {
+                    openButton("Tidal", systemImage: "link", url: tidal)
+                }
+                if let deezer = songLinks?.deezer.flatMap(URL.init(string:)) {
+                    openButton("Deezer", systemImage: "link", url: deezer)
+                }
             }
         }
+    }
+
+    /// Кнопка площадки с апгрейдом: точная ссылка Odesli (иконка link),
+    /// пока её нет — поисковый URL (иконка лупы). Кривая точная ссылка
+    /// (не URL) — тот же поисковый фоллбэк.
+    private func linkedButton(_ title: String, exact: String?,
+                              search: URL) -> some View {
+        let exactURL = exact.flatMap(URL.init(string:))
+        return openButton(title,
+                          systemImage: exactURL == nil ? "magnifyingglass" : "link",
+                          url: exactURL ?? search)
     }
 
     private func openButton(_ title: String, systemImage: String, url: URL) -> some View {

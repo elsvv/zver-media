@@ -529,6 +529,24 @@ final class LibraryStore: ObservableObject {
         }.value
     }
 
+    /// Кэшированный JSON точных ссылок Odesli (или nil — кэша нет):
+    /// повторное открытие шита рекомендации не ходит в сеть.
+    func cachedRecommendationLinks(normKey: String) async -> String? {
+        guard let recommendationStore else { return nil }
+        return await Task.detached(priority: .userInitiated) {
+            try? recommendationStore.cachedLinks(normKey: normKey)
+        }.value ?? nil
+    }
+
+    /// Кэширует JSON точных ссылок Odesli (по тапу в шите). Неизвестный
+    /// ключ — no-op на стороне стора (старый кэш ленты без памяти показа).
+    func cacheRecommendationLinks(normKey: String, json: String) async {
+        guard let recommendationStore else { return }
+        await Task.detached(priority: .utility) {
+            try? recommendationStore.cacheLinks(normKey: normKey, json: json)
+        }.value
+    }
+
     /// Ключи понравившихся рекомендаций — ♥-бейджи карточек ленты.
     func likedRecommendationKeys() async -> Set<String> {
         guard let recommendationStore else { return [] }

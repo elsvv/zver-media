@@ -248,4 +248,25 @@ import Testing
 
         #expect(try count(catalog) == 0)
     }
+
+    // MARK: - cachedLinks
+
+    @Test func cachedLinksReturnsStoredJSON() throws {
+        // Повторное открытие шита читает кэш Odesli и не ходит в сеть.
+        let (store, _) = try makeStore()
+        let key = ReleaseNorm.key(artist: "A", album: "Alpha")
+        try store.recordShown(rec("A", "Alpha", at: 1_000))
+        try store.cacheLinks(normKey: key, json: #"{"tidal":"url"}"#)
+
+        #expect(try store.cachedLinks(normKey: key) == #"{"tidal":"url"}"#)
+    }
+
+    @Test func cachedLinksNilWithoutCacheOrRow() throws {
+        let (store, _) = try makeStore()
+        let key = ReleaseNorm.key(artist: "A", album: "Alpha")
+        try store.recordShown(rec("A", "Alpha", at: 1_000))
+
+        #expect(try store.cachedLinks(normKey: key) == nil)          // строка без кэша
+        #expect(try store.cachedLinks(normKey: "нет|такого") == nil) // строки нет
+    }
 }

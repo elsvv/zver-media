@@ -207,6 +207,19 @@ public final class RecommendationStore: Sendable {
         }
     }
 
+    /// Кэшированный JSON ссылок Odesli (`cacheLinks`) или nil — кэша нет
+    /// (строка без ссылок ИЛИ неизвестный `normKey`): повторное открытие
+    /// шита читает отсюда и не ходит в сеть.
+    public func cachedLinks(normKey: String) throws -> String? {
+        try catalog.dbQueue.read { db in
+            try String.fetchOne(
+                db,
+                sql: "SELECT links FROM recommendation WHERE normKey = ?",
+                arguments: [normKey]
+            )
+        }
+    }
+
     /// «Артист — Альбом» из строк выборки (формат блоков промпта).
     private static func labels(_ db: Database, sql: String,
                                arguments: StatementArguments) throws -> [String] {
