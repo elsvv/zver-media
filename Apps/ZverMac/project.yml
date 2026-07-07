@@ -38,6 +38,18 @@ targets:
         NSLocalNetworkUsageDescription: "Zver Media передаёт альбомы на ваш iPhone по локальной сети: ищет устройства поблизости и раздаёт музыку напрямую, без интернета и облака."
         NSBonjourServices:
           - _zver._tcp
+  ZverMacTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources: [Tests]
+    dependencies:
+      - target: ZverMac
+      - package: ZverMetadata
+      - package: ZverTransport
+    settings:
+      base:
+        SWIFT_VERSION: "6.0"
+        GENERATE_INFOPLIST_FILE: true
 schemes:
   ZverMac:
     build:
@@ -45,3 +57,7 @@ schemes:
         ZverMac: all
     run:
       config: Debug
+    test:
+      config: Debug
+      targets:
+        - ZverMacTests

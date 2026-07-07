@@ -27,6 +27,10 @@ struct AlbumPreviewView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
                     header
+                    if draft.hasDSD {
+                        Divider()
+                        dsdOptions
+                    }
                     Divider()
                     trackList
                 }
@@ -82,6 +86,29 @@ struct AlbumPreviewView: View {
         }
     }
 
+    // MARK: DSD → FLAC
+
+    /// Пикер качества конвертации для DSD-альбомов (показывается только когда в
+    /// альбоме есть `.dsf`). Во время самой конвертации заблокирован.
+    private var dsdOptions: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("DSD → FLAC")
+                .font(.headline)
+            Text("DSD (SACD) нельзя проиграть на iPhone напрямую — Мак сконвертирует его в FLAC без потери качества. Файлы в исходной папке не меняются.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Picker("Качество", selection: $draft.dsdQuality) {
+                ForEach(DSDQuality.allCases) { quality in
+                    Text(quality.label).tag(quality)
+                }
+            }
+            .pickerStyle(.radioGroup)
+            .labelsHidden()
+            .disabled(draft.conversionProgress != nil)
+        }
+    }
+
     // MARK: Треки
 
     private var trackList: some View {
@@ -107,10 +134,17 @@ struct AlbumPreviewView: View {
                     .lineLimit(2)
             }
             Spacer()
-            if isBuilding {
+            if let progress = draft.conversionProgress {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text("Конвертирую DSD… \(progress.done)/\(progress.total)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            } else if isBuilding {
                 ProgressView().controlSize(.small)
             }
-            Button("В очередь") {
+            Button(draft.hasDSD ? "Конвертировать и в очередь" : "В очередь") {
                 enqueueError = nil
                 isBuilding = true
                 Task {
@@ -144,7 +178,12 @@ struct AlbumPreviewView: View {
         let folderPath = draft.sourceFolder.standardizedFileURL.path
         let filePath = url.standardizedFileURL.path
         if filePath.hasPrefix(folderPath + "/") {
-            draft.artworkFileName = url.lastPathComponent
+            // ОТНОСИТЕЛЬНЫЙ путь от корня альбома: обложка может лежать в подпапке
+            // (напр. `covers/front.jpg`). Взяли бы `lastPathComponent` — `artworkURL`
+            // указал бы на `<корень>/front.jpg` (нет файла) → превью не обновится и на
+            // телефон обложка не приедет. Пайплайн (манифест/раздача/sidecar) несёт
+            // относительный путь и воссоздаёт подпапку, как для треков/extras.
+            draft.artworkFileName = AlbumDraft.relativePath(of: url, under: draft.sourceFolder)
         }
     }
 }
@@ -193,6 +232,11 @@ private struct LabeledField: View {
 private extension TrackDraft {
     /// Короткий технический бейдж (расширение + частота/разрядность).
     var formatBadge: String {
+        // DSD-трек: показываем «DSD64/128» (кратность частоты к CD), а не «1/2822».
+        if isDSD {
+            let multiple = Int((sampleRate / 44_100).rounded())
+            return multiple > 0 ? "DSD\(multiple)" : "DSD"
+        }
         var parts: [String] = [fileExtension.uppercased()]
         let khz = sampleRate / 1000
         if khz > 0 {

@@ -70,6 +70,56 @@ import Foundation
         #expect(sorted[2].duration > 0)
     }
 
+    @Test func multiFileCueExpandsEachFileIntoItsTracks() async throws {
+        // Multi-file cue (винил): один `.cue` ссылается на несколько `.flac` (стороны),
+        // каждый FILE — свои треки. Каждая сторона раскрывается в свои треки; офсеты
+        // ОТНОСИТЕЛЬНЫ началу своего файла; нумерация сквозная; последний трек стороны
+        // — до её EOF. Имя `.cue` НЕ совпадает с именами `.flac` — матч по FILE.
+        let root = try makeAlbum(named: "Vinyl")
+        let fm = FileManager.default
+        try fm.copyItem(at: fixture(Self.container), to: root.appendingPathComponent("album - side 1.flac"))
+        try fm.copyItem(at: fixture(Self.container), to: root.appendingPathComponent("album - side 2.flac"))
+        try Data("""
+        PERFORMER "Artist"
+        TITLE "Vinyl"
+        FILE "album - side 1.flac" WAVE
+          TRACK 01 AUDIO
+            TITLE "A1"
+            INDEX 01 00:00:00
+          TRACK 02 AUDIO
+            TITLE "A2"
+            INDEX 01 00:03:00
+        FILE "album - side 2.flac" WAVE
+          TRACK 03 AUDIO
+            TITLE "B1"
+            INDEX 01 00:00:00
+          TRACK 04 AUDIO
+            TITLE "B2"
+            INDEX 01 00:04:00
+        """.utf8).write(to: root.appendingPathComponent("Vinyl.cue"))
+
+        let infos = try await LibraryScanner.scan(directory: root.deletingLastPathComponent())
+        #expect(infos.count == 4)
+
+        let sorted = infos.sorted { ($0.cueIndex ?? 0) < ($1.cueIndex ?? 0) }
+        #expect(sorted.map(\.cueIndex) == [1, 2, 3, 4])          // сквозная нумерация
+        #expect(sorted.map(\.trackNumber) == [1, 2, 3, 4])
+        #expect(sorted.map(\.title) == ["A1", "A2", "B1", "B2"])
+        // Каждая сторона — свой контейнер:
+        #expect(sorted[0].url.lastPathComponent == "album - side 1.flac")
+        #expect(sorted[1].url.lastPathComponent == "album - side 1.flac")
+        #expect(sorted[2].url.lastPathComponent == "album - side 2.flac")
+        #expect(sorted[3].url.lastPathComponent == "album - side 2.flac")
+        // Офсеты ОТНОСИТЕЛЬНЫ началу своего файла (B1 = 0, НЕ длина стороны 1):
+        let sr = Self.sampleRate
+        #expect(sorted.map(\.startFrame) == [0, 3 * sr, 0, 4 * sr])
+        // Последний трек КАЖДОЙ стороны — до её EOF (frameCount nil):
+        #expect(sorted[0].frameCount == 3 * sr)   // A1
+        #expect(sorted[1].frameCount == nil)      // A2 (последний стороны 1)
+        #expect(sorted[2].frameCount == 4 * sr)   // B1
+        #expect(sorted[3].frameCount == nil)      // B2 (последний стороны 2)
+    }
+
     @Test func multiFileCueIsNotExpanded() async throws {
         // Одноимённый cue, но с несколькими FILE (не образ) — не раскрываем:
         // контейнер остаётся одним обычным треком без офсетов.

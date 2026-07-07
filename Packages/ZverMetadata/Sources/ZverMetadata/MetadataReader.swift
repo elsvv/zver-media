@@ -29,11 +29,39 @@ public struct AudioFileInfo: Sendable {
     /// Длина логического cue-трека в сэмплах. Последний трек считается до конца
     /// файла (оценка по duration; плеер клампит по реальной длине). nil у обычных.
     public var frameCount: Int64? = nil
+    /// Источник — DSD (`.dsf`): играть на телефоне нельзя, Мак сконвертит его в
+    /// FLAC при импорте. `sampleRate` тут — частота DSD (для метки «DSD64»).
+    public var isDSD: Bool = false
 }
 
 public enum MetadataReader {
     public static func read(url: URL) async throws -> AudioFileInfo {
         let probed = try FormatProbe.probe(url: url)
+
+        // DSD (`.dsf`): AVFoundation его не читает (ни формат, ни теги). Название и
+        // номер берём из имени файла («01 - Птица» → №1, «Птица»); альбом/артист
+        // пользователь задаёт в превью (album-уровень), обложку сканер найдёт в
+        // папке. Сами теги (если есть) перенесёт ffmpeg в итоговый FLAC.
+        if probed.isDSD {
+            let stem = url.deletingPathExtension().lastPathComponent
+            let (number, title) = parseTrackFilename(stem)
+            return AudioFileInfo(
+                title: title,
+                artist: nil,
+                album: nil,
+                trackNumber: number,
+                discNumber: nil,
+                year: nil,
+                duration: probed.duration,
+                sampleRate: probed.sampleRate,
+                bitDepth: probed.bitDepth,
+                artworkData: nil,
+                artworkFileURL: nil,
+                url: url,
+                isDSD: true
+            )
+        }
+
         let asset = AVURLAsset(url: url)
 
         var tags: [String: String] = [:]
@@ -93,5 +121,18 @@ public enum MetadataReader {
             artworkFileURL: nil,
             url: url
         )
+    }
+
+    /// «01 - Птица» → (1, "Птица"); «12. Foo» → (12, "Foo"); «Птица» → (nil, "Птица").
+    /// Ведущие цифры — номер трека, дальше разделитель (` -._–—`) и название.
+    /// Используется для DSD-файлов (у которых теги AVFoundation не читает).
+    static func parseTrackFilename(_ stem: String) -> (number: Int?, title: String) {
+        let trimmed = stem.trimmingCharacters(in: .whitespaces)
+        let digits = trimmed.prefix(while: \.isNumber)
+        guard !digits.isEmpty, let number = Int(digits) else { return (nil, trimmed) }
+        let separators: Set<Character> = [" ", "-", "_", ".", "\u{2013}", "\u{2014}"]
+        let rest = trimmed[digits.endIndex...].drop(while: { separators.contains($0) })
+        let title = rest.trimmingCharacters(in: .whitespaces)
+        return (number, title.isEmpty ? trimmed : title)
     }
 }

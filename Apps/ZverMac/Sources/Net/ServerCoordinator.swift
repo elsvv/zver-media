@@ -48,6 +48,7 @@ final class ServerCoordinator: ObservableObject {
     private var serverEpoch = 0
 
     init(queue: OutgoingQueue,
+         delivered: DeliveredStore,
          serviceName: String = PairingHostController.defaultServiceName,
          autoStart: Bool = true) {
         let state = HostState()
@@ -71,10 +72,36 @@ final class ServerCoordinator: ObservableObject {
         self.pairing = PairingHostController(state: state, keyStore: keyStore, serviceName: serviceName)
 
         // confirm от телефона приходит на сетевой очереди (@Sendable) → прыгаем
-        // на @MainActor в модель: снимаем альбом с очереди и пересобираем снимок.
+        // на @MainActor в модель: помечаем альбом доставленным (чтобы автоочередь его
+        // больше не возвращала), снимаем с очереди и пересобираем снимок.
         self.fileServer = FileServer(state: state) { albumId in
             Task { @MainActor in
+                // Данные альбома берём ДО host.confirm (он снимает альбом с очереди).
+                guard let album = queue.albums.first(where: { $0.id == albumId }) else {
+                    host.confirm(albumId: albumId)
+                    return
+                }
+                // Учёт доставки — по ОРИГИНАЛЬНОЙ папке (у DSD раздача из staging).
+                let keyFolder = album.deliveredKeyFolder
+                let servingFolder = album.sourceFolder
+                let fingerprint = await Task.detached(priority: .utility) {
+                    DeliveredStore.fingerprint(of: keyFolder)
+                }.value
+                delivered.markDelivered(folder: keyFolder, fingerprint: fingerprint)
+                // Доставленный альбом физически убираем из ~/.zver-autoqueue —
+                // тогда он НИКОГДА не всплывёт в очереди снова (даже если отпечаток
+                // папки съедет от Finder/облака). Это ключ к «синканул → пропало».
+                MacEnqueue.removeFromAutoqueue(folder: keyFolder)
+                // Сначала снимаем с очереди (перестаём раздавать), ПОТОМ чистим staging:
+                // иначе был бы момент, когда снимок раздачи ещё рекламирует уже удалённые
+                // файлы. Чистим, только если альбом реально ушёл из очереди (не был
+                // пере-поставлен за время await — тогда его staging ещё нужен).
                 host.confirm(albumId: albumId)
+                if !queue.albums.contains(where: { $0.id == albumId }) {
+                    await Task.detached(priority: .utility) {
+                        DSDStaging.cleanup(servingFolder)
+                    }.value
+                }
             }
         }
 
