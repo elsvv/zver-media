@@ -88,6 +88,16 @@ enum RemoteLibraryBuilder {
         groups.first { self.albumId(for: $0) == albumId }
     }
 
+    /// Каноничный id альбома, СОДЕРЖАЩЕГО трек — id группы каталога, не
+    /// реконструкция из тегов трека (у сборников/VA артист трека ≠ артисту
+    /// группы). Для `RemotePlayerState.currentAlbumId`: ключ обложки
+    /// now-playing на Маке обязан совпадать с ключами грида библиотеки.
+    static func albumId(containingTrackId trackId: String,
+                        in groups: [AlbumGroup]) -> String? {
+        groups.first { group in group.tracks.contains { $0.id == trackId } }
+            .map(albumId(for:))
+    }
+
     /// Треки альбома в порядке группы (как сгруппировал `AlbumGroup.group`).
     static func tracks(forAlbumId albumId: String, in groups: [AlbumGroup]) -> [RemoteTrack] {
         guard let group = group(withId: albumId, in: groups) else { return [] }

@@ -139,6 +139,12 @@ private struct SyncToPhonePanel: View {
     @ObservedObject var coordinator: RemoteClientCoordinator
     @ObservedObject var store: RemoteClientStore
 
+    /// Оптимистичное гашение кнопки: первый пуш `importStatus` приходит с
+    /// iPhone через ~3с (browse) — без флага второй тап в этом окне слал бы
+    /// дубль `startImport` (на iPhone он no-op, но кнопка не должна выглядеть
+    /// активной). Сбрасывается любым свежим статусом.
+    @State private var didRequestImport = false
+
     init(coordinator: RemoteClientCoordinator) {
         self.coordinator = coordinator
         self.store = coordinator.store
@@ -152,12 +158,16 @@ private struct SyncToPhonePanel: View {
                 Spacer()
                 if coordinator.isConnected {
                     Button {
+                        didRequestImport = true
                         coordinator.startImport()
                     } label: {
                         Label("Импортировать на iPhone", systemImage: "square.and.arrow.down.on.square")
                     }
-                    .disabled(isDownloading)
+                    .disabled(isDownloading || didRequestImport)
                 }
+            }
+            .onChange(of: store.importStatus) { _, _ in
+                didRequestImport = false
             }
             if coordinator.isConnected {
                 statusView

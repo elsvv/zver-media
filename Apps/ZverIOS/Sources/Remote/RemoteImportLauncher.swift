@@ -4,15 +4,21 @@ import ZverTransport
 
 /// Headless-импорт с Мака по команде пульта (`startImport`): тот же стек, что
 /// у экрана «Импорт» (Bonjour → сохранённый токен → манифест →
-/// `ImportCoordinator`), но без UI-конфирма — Мак уже спарен и авторизован в
-/// канале пульта, доверие установлено.
+/// `ImportCoordinator`), но без UI-конфирма и превью манифеста.
+///
+/// **Модель доверия — честно.** Авторизация pult-СОЕДИНЕНИЯ (спаренный Мак
+/// прислал команду) и идентичность синк-МАКА, с которого реально качаем, — две
+/// разные вещи: команда не несёт идентичности источника, синк-Мак выбирается
+/// заново по Bonjour-имени, а имя не аутентифицировано. Синк-токен привязан к
+/// имени сервиса (наследие ручного флоу этапа 3) — злоумышленник в той же
+/// локальной сети, поднявший sync-сервис под именем спаренного Мака, получит
+/// предъявленный токен и сможет отдать свой манифест. В ручном флоу это
+/// прикрыто человеком (выбор Мака + превью перед импортом), здесь — нет.
+/// Принято для домашней сети с одним Маком; смягчение: при НЕСКОЛЬКИХ
+/// видимых спаренных синк-Маках отказываемся (не угадываем источник).
 ///
 /// Публикует агрегированный `RemoteImportStatus` — `RemoteControlService`
 /// пушит его Маку (прогресс синка виден на Маке, как на телефоне).
-///
-/// Выбор Мака: канал пульта не несёт идентичности синк-сервиса, поэтому берём
-/// ЕДИНСТВЕННЫЙ видимый в сети спаренный (с сохранённым токеном) синк-Мак;
-/// несколько — первый по имени (детерминированно; типичный сетап — один Мак).
 @MainActor
 final class RemoteImportLauncher: ObservableObject {
     @Published private(set) var status = RemoteImportStatus(
@@ -67,8 +73,16 @@ final class RemoteImportLauncher: ObservableObject {
 
     private func run() async {
         // 1. Найти спаренный синк-Мак (короткий browse, ~3с накопления).
-        guard let mac = await discoverPairedMac() else {
+        let candidates = await discoverPairedMacs()
+        guard let mac = candidates.first else {
             fail("Не вижу спаренный Мак с открытой очередью синка в сети.")
+            return
+        }
+        // Команда пульта не несёт идентичности синк-сервиса: при нескольких
+        // спаренных Маках источник не угадываем (алфавитный выбор мог бы
+        // тихо качать не с того) — честный отказ, импорт руками с телефона.
+        guard candidates.count == 1 else {
+            fail("В сети несколько спаренных Маков — запусти импорт с телефона.")
             return
         }
         guard let token = keyStore.token(forService: mac.name) else {
@@ -114,9 +128,9 @@ final class RemoteImportLauncher: ObservableObject {
         await coordinator.start()
     }
 
-    /// Один короткий browse: копим сервисы 3 секунды, берём sync-роль со
-    /// спаренным токеном (несколько — первый по имени).
-    private func discoverPairedMac() async -> DiscoveredService? {
+    /// Один короткий browse: копим сервисы 3 секунды, возвращаем ВСЕ sync-роли
+    /// со спаренным токеном (по имени) — вызывающий решает, что делать с >1.
+    private func discoverPairedMacs() async -> [DiscoveredService] {
         let browser = browserFactory()
         let holder = ServicesHolder()
         browser.start { services in
@@ -129,7 +143,6 @@ final class RemoteImportLauncher: ObservableObject {
         return services
             .filter { $0.role == ServiceTXT.sync && keyStore.token(forService: $0.name) != nil }
             .sorted { $0.name < $1.name }
-            .first
     }
 
     /// Потокобезопасное накопление последнего снимка сервисов из

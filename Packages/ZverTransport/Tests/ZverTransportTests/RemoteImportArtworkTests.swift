@@ -109,6 +109,35 @@ import Foundation
         #expect(decoded.payload == .unknown(type: "startExport"))
     }
 
+    // MARK: RemotePlayerState.currentAlbumId (аддитивно)
+
+    @Test func roundTripStateWithCurrentAlbumId() throws {
+        let state = RemotePlayerState(playback: .playing, current: nil,
+                                      position: 1, queue: [], currentIndex: nil,
+                                      currentAlbumId: "VA\u{1}OST")
+        let payload = RemotePayload.state(state)
+        #expect(try roundTrip(payload) == payload)
+    }
+
+    @Test func stateWithoutCurrentAlbumIdDecodesToNil() throws {
+        // Старый JSON без поля — backward-совместимость, currentAlbumId == nil.
+        let json = """
+        {
+          "protocolVersion": 1,
+          "payload": {
+            "type": "state",
+            "state": { "playback": "paused", "position": 0, "queue": [] }
+          }
+        }
+        """
+        let decoded = try codec.decode(Data(json.utf8))
+        guard case let .state(state) = decoded.payload else {
+            Issue.record("expected .state payload")
+            return
+        }
+        #expect(state.currentAlbumId == nil)
+    }
+
     // MARK: RemoteAlbum.cloudState
 
     @Test func roundTripLibraryWithCloudState() throws {

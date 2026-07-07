@@ -230,9 +230,11 @@ final class RemoteControlService: ObservableObject {
         case let .playAlbum(albumId, startIndex):
             handlePlayAlbum(albumId: albumId, startIndex: startIndex)
         case .startImport:
-            // Запуск синка с Мака без конфирма на телефоне: Мак авторизован в
-            // канале пульта (спарен) — доверие уже установлено. Повторная
-            // команда при идущем импорте — no-op в лаунчере.
+            // Запуск синка с Мака без конфирма на телефоне. Авторизован здесь
+            // pult-КАНАЛ (спаренный Мак прислал команду); идентичность
+            // синк-Мака, с которого лаунчер реально качает, отдельная — см.
+            // модель доверия в шапке RemoteImportLauncher. Повтор при идущем
+            // импорте — no-op в лаунчере.
             importLauncher?.start()
         case let .requestArtwork(albumId):
             handleRequestArtwork(albumId: albumId, clientId: id)
@@ -336,12 +338,20 @@ final class RemoteControlService: ObservableObject {
         let q = player.queue
         let remoteQueue = q.tracks.map(RemoteLibraryBuilder.remoteTrack(from:))
         let current = q.current.map(RemoteLibraryBuilder.remoteTrack(from:))
+        // Каноничный id альбома текущего трека — из ГРУППЫ каталога: Мак
+        // ключует обложку now-playing тем же id, что и грид библиотеки.
+        let currentAlbumId = q.current.flatMap { track in
+            library.flatMap {
+                RemoteLibraryBuilder.albumId(containingTrackId: track.id, in: $0.albums)
+            }
+        }
         return RemotePlayerState(
             playback: Self.playback(from: player.state),
             current: current,
             position: player.currentTime,
             queue: remoteQueue,
-            currentIndex: q.currentIndex
+            currentIndex: q.currentIndex,
+            currentAlbumId: currentAlbumId
         )
     }
 

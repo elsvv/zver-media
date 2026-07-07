@@ -142,16 +142,23 @@ public struct RemotePlayerState: Codable, Equatable, Sendable {
     public var position: Double
     public var queue: [RemoteTrack]
     public var currentIndex: Int?
+    /// Каноничный id альбома ТЕКУЩЕГО трека — тот же, что в `RemoteLibrary`
+    /// (id ГРУППЫ каталога, а не реконструкция из тегов трека: у сборников/VA
+    /// артист трека ≠ артисту группы, и ключ обложки now-playing иначе
+    /// разошёлся бы с гридом библиотеки). Аддитивно: nil от старых телефонов.
+    public var currentAlbumId: String?
 
     public init(playback: RemotePlayback,
                 current: RemoteTrack? = nil,
                 position: Double,
                 queue: [RemoteTrack],
-                currentIndex: Int? = nil) {
+                currentIndex: Int? = nil,
+                currentAlbumId: String? = nil) {
         self.playback = playback
         self.current = current
         self.position = position
         self.queue = queue
         self.currentIndex = currentIndex
+        self.currentAlbumId = currentAlbumId
     }
 }

@@ -130,13 +130,17 @@ private struct NowPlayingPanel: View {
         }
     }
 
-    /// Обложка альбома текущего трека. albumId выводим из трека тем же способом,
-    /// что iPhone (`RemoteAlbumID.of` = `RemoteLibraryBuilder.albumId`) — ключ
-    /// совпадает с гридом библиотеки, обложка берётся из общего кэша.
+    /// Обложка альбома текущего трека. Первичен `currentAlbumId` из состояния —
+    /// каноничный id ГРУППЫ каталога iPhone, гарантированно тот же, что в гриде
+    /// библиотеки (у сборников/VA артист трека ≠ артисту группы, реконструкция
+    /// из тегов трека дала бы другой ключ и промах кэша). Фоллбэк на
+    /// `RemoteAlbumID.of(track:)` — для старых телефонов без поля.
     @ViewBuilder
     private var artworkView: some View {
         if let track = store.playerState?.current {
-            ArtworkThumbnail(albumId: RemoteAlbumID.of(track: track), artwork: artwork, cornerRadius: 12)
+            ArtworkThumbnail(
+                albumId: store.playerState?.currentAlbumId ?? RemoteAlbumID.of(track: track),
+                artwork: artwork, cornerRadius: 12)
                 .frame(width: 220, height: 220)
                 .shadow(radius: 8, y: 4)
         } else {
