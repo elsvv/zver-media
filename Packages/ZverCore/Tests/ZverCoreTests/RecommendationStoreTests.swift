@@ -201,6 +201,31 @@ import Testing
         #expect(keys == [ReleaseNorm.key(artist: "B", album: "Beta")])
     }
 
+    // MARK: - keys(withStatus:)
+
+    @Test func keysWithStatusReturnsOnlyMatching() throws {
+        // ♥-бейджи карточек ленты: нужен набор liked-ключей, остальные статусы
+        // не подмешиваются.
+        let (store, _) = try makeStore()
+        let likedKey = ReleaseNorm.key(artist: "A", album: "Alpha")
+        try store.recordShown(rec("A", "Alpha", at: 1_000))
+        try store.recordShown(rec("B", "Beta", at: 1_000))
+        try store.recordShown(rec("C", "Gamma", at: 1_000))
+        try store.setStatus(normKey: likedKey, status: .liked,
+                            at: Date(timeIntervalSince1970: 2_000))
+        try store.setStatus(normKey: ReleaseNorm.key(artist: "B", album: "Beta"),
+                            status: .hidden, at: Date(timeIntervalSince1970: 2_000))
+
+        #expect(try store.keys(withStatus: .liked) == [likedKey])
+    }
+
+    @Test func keysWithStatusEmptyWhenNoMatches() throws {
+        let (store, _) = try makeStore()
+        try store.recordShown(rec("A", "Alpha", at: 1_000))
+
+        #expect(try store.keys(withStatus: .owned).isEmpty)
+    }
+
     // MARK: - cacheLinks
 
     @Test func cacheLinksStoresJSONWithoutTouchingStatusOrDates() throws {

@@ -88,6 +88,9 @@ final class HomeFeedService: ObservableObject {
 
     @Published private(set) var feed: CachedHomeFeed?
     @Published private(set) var state: FeedState = .idle
+    /// Ключи понравившихся рекомендаций (`ReleaseNorm.key`) — ♥ на карточках.
+    /// Грузятся из памяти при старте, правятся на месте фидбеком из шита.
+    @Published private(set) var likedKeys: Set<String> = []
 
     private let library: LibraryStore
     private let profiles: BrainProfilesStore
@@ -100,6 +103,7 @@ final class HomeFeedService: ObservableObject {
         self.profiles = profiles
         self.cacheURL = cacheURL
         loadCache()
+        Task { await reloadLikedKeys() }
     }
 
     /// Сколько альбомов влезает в промпт: больше — режем с приоритетом
@@ -370,6 +374,59 @@ final class HomeFeedService: ObservableObject {
         // Память показанного: только реально попавшее в ленту.
         await library.recordShownRecommendations(passed)
         return sections
+    }
+
+    // MARK: - Фидбек (шит v2)
+
+    /// Понравилась ли рекомендация — ♥ на карточке и в шите. У старого кэша
+    /// ленты normKey нет — считаем на месте (тот же `ReleaseNorm`).
+    func isLiked(_ suggestion: ExternalSuggestion) -> Bool {
+        likedKeys.contains(normKey(of: suggestion))
+    }
+
+    /// Фидбек из шита: пишет статус в память рекомендаций и правит ленту на
+    /// месте — ✕ «Не моё» убирает карточку сразу, не дожидаясь refresh.
+    /// «У меня уже есть» (owned) карточку не трогает: это страховка дедупа —
+    /// релиз перестанет предлагаться со следующего обновления.
+    func applyFeedback(_ suggestion: ExternalSuggestion,
+                       status: RecommendationStatus) async {
+        let key = normKey(of: suggestion)
+        await library.setRecommendationStatus(normKey: key, status: status)
+        if status == .liked {
+            likedKeys.insert(key)
+        } else {
+            likedKeys.remove(key)
+        }
+        if status == .hidden {
+            removeSuggestion(id: suggestion.id)
+        }
+    }
+
+    /// Перечитывает liked-ключи из памяти рекомендаций (бейджи ♥).
+    func reloadLikedKeys() async {
+        likedKeys = await library.likedRecommendationKeys()
+    }
+
+    private func normKey(of suggestion: ExternalSuggestion) -> String {
+        suggestion.normKey
+            ?? ReleaseNorm.key(artist: suggestion.artist, album: suggestion.album)
+    }
+
+    /// Убирает карточку из кэшированной ленты (✕ «Не моё»). Опустевшая секция
+    /// удаляется целиком; обновлённая лента перезаписывает кэш на диске.
+    private func removeSuggestion(id: String) {
+        guard let current = feed else { return }
+        let sections = current.sections.compactMap { section -> ResolvedHomeSection? in
+            guard section.external.contains(where: { $0.id == id }) else { return section }
+            let rest = section.external.filter { $0.id != id }
+            guard !rest.isEmpty || !section.albumKeys.isEmpty else { return nil }
+            return ResolvedHomeSection(id: section.id, title: section.title,
+                                       subtitle: section.subtitle, tags: section.tags,
+                                       albumKeys: section.albumKeys, external: rest)
+        }
+        let cached = CachedHomeFeed(sections: sections, updatedAt: current.updatedAt)
+        feed = cached
+        saveCache(cached)
     }
 
     private static func describe(_ error: BrainError) -> String {

@@ -184,6 +184,18 @@ public final class RecommendationStore: Sendable {
         }
     }
 
+    /// Ключи рекомендаций с данным статусом. Нужны ленте для ♥-бейджей
+    /// карточек (liked) — без окна по времени: лайк не протухает.
+    public func keys(withStatus status: RecommendationStatus) throws -> Set<String> {
+        try catalog.dbQueue.read { db in
+            try String.fetchSet(
+                db,
+                sql: "SELECT normKey FROM recommendation WHERE status = ?",
+                arguments: [status.rawValue]
+            )
+        }
+    }
+
     /// Кэширует JSON ссылок Odesli. Чистый кэш, не фидбек: `status` и
     /// `updatedAt` не трогаем. Неизвестный `normKey` — no-op.
     public func cacheLinks(normKey: String, json: String) throws {

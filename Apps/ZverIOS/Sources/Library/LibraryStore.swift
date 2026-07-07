@@ -520,6 +520,23 @@ final class LibraryStore: ObservableObject {
         }.value
     }
 
+    /// Фидбек по рекомендации из шита: ♥ liked / ✕ hidden / «уже есть» owned
+    /// (или откат в shown). Неизвестный ключ — no-op на стороне стора.
+    func setRecommendationStatus(normKey: String, status: RecommendationStatus) async {
+        guard let recommendationStore else { return }
+        await Task.detached(priority: .userInitiated) {
+            try? recommendationStore.setStatus(normKey: normKey, status: status)
+        }.value
+    }
+
+    /// Ключи понравившихся рекомендаций — ♥-бейджи карточек ленты.
+    func likedRecommendationKeys() async -> Set<String> {
+        guard let recommendationStore else { return [] }
+        return await Task.detached(priority: .userInitiated) {
+            (try? recommendationStore.keys(withStatus: .liked)) ?? []
+        }.value
+    }
+
     /// Избранные альбомы в порядке библиотеки (для раздела «Избранное»).
     var favoriteAlbums: [AlbumGroup] {
         albums.filter { isFavorite(album: $0) }

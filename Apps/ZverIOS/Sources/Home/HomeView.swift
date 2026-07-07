@@ -1,4 +1,5 @@
 import SwiftUI
+import ZverBrain
 import ZverCore
 
 /// Таб «Главная»: лента в духе Apple Music. Сверху — локальное «Недавно
@@ -57,7 +58,7 @@ struct HomeView: View {
             Text("Статистика прослушивания уйдёт выбранной модели, это потратит токены API.")
         }
         .sheet(item: $selectedSuggestion) { suggestion in
-            ExternalSuggestionSheet(suggestion: suggestion)
+            ExternalSuggestionSheet(suggestion: suggestion, feedService: feedService)
         }
     }
 
@@ -214,7 +215,8 @@ struct HomeView: View {
                         Button {
                             selectedSuggestion = suggestion
                         } label: {
-                            ExternalSuggestionCard(suggestion: suggestion)
+                            ExternalSuggestionCard(suggestion: suggestion,
+                                                   liked: feedService.isLiked(suggestion))
                                 .frame(width: 150)
                         }
                         .buttonStyle(.plain)
@@ -243,9 +245,11 @@ struct HomeView: View {
 }
 
 /// Карточка внешней рекомендации: обложка из iTunes (пока грузится/не нашлась —
-/// шейдерная заглушка с артистом), название + артист под ней.
+/// шейдерная заглушка с артистом), название + артист под ней. Поверх обложки —
+/// бейдж жанра (из валидации) и ♥, если рекомендация понравилась.
 struct ExternalSuggestionCard: View {
     let suggestion: ExternalSuggestion
+    let liked: Bool
 
     @State private var artwork: UIImage?
 
@@ -269,6 +273,28 @@ struct ExternalSuggestionCard: View {
                     .padding(4)
                     .background(.black.opacity(0.35), in: Circle())
                     .padding(6)
+            }
+            .overlay(alignment: .topLeading) {
+                if liked {
+                    Image(systemName: "heart.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.pink)
+                        .padding(4)
+                        .background(.black.opacity(0.35), in: Circle())
+                        .padding(6)
+                }
+            }
+            .overlay(alignment: .bottomLeading) {
+                if let genre = suggestion.genre {
+                    Text(genre)
+                        .font(.caption2.weight(.medium))
+                        .lineLimit(1)
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(.black.opacity(0.35), in: Capsule())
+                        .padding(6)
+                }
             }
             Text(suggestion.album)
                 .font(.callout)
@@ -296,12 +322,18 @@ extension ITunesCatalog {
     }
 }
 
-/// Шит внешней рекомендации: крупная обложка, метадата и reason —
-/// «почему тебе зайдёт» от модели.
+/// Шит внешней рекомендации v2: крупная обложка, метадата (жанр/год), reason
+/// «почему тебе зайдёт», кнопки «Открыть в…» (Apple Music — прямой ссылкой из
+/// валидации, остальные — мгновенным поиском) и фидбек ♥ / ✕ / «уже есть».
 struct ExternalSuggestionSheet: View {
     let suggestion: ExternalSuggestion
+    @ObservedObject var feedService: HomeFeedService
 
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.openURL) private var openURL
     @State private var artwork: UIImage?
+
+    private var liked: Bool { feedService.isLiked(suggestion) }
 
     var body: some View {
         ScrollView {
@@ -323,10 +355,14 @@ struct ExternalSuggestionSheet: View {
                     Text(suggestion.album)
                         .font(.title2.weight(.bold))
                         .multilineTextAlignment(.center)
-                    Text(suggestion.year.map { "\(suggestion.artist) • \($0)" }
-                         ?? suggestion.artist)
+                    Text(suggestion.artist)
                         .font(.body.weight(.medium))
                         .foregroundStyle(.secondary)
+                    if let meta = metaLine {
+                        Text(meta)
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    }
                 }
 
                 Text(suggestion.reason)
@@ -334,6 +370,9 @@ struct ExternalSuggestionSheet: View {
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 4)
+
+                feedbackRow
+                openInSection
 
                 Label("Найди и закинь через Mac-синк — появится в библиотеке",
                       systemImage: "laptopcomputer.and.arrow.down")
@@ -346,5 +385,99 @@ struct ExternalSuggestionSheet: View {
         .task(id: suggestion.id) {
             artwork = await ITunesCatalog.shared.artwork(for: suggestion)
         }
+    }
+
+    /// «Жанр • Год» из валидации; чего нет — не показываем.
+    private var metaLine: String? {
+        let parts = [suggestion.genre, suggestion.year.map(String.init)]
+            .compactMap { $0 }
+        return parts.isEmpty ? nil : parts.joined(separator: " • ")
+    }
+
+    // MARK: - Фидбек
+
+    /// ♥ «Нравится» (повторный тап снимает), ✕ «Не моё» (карточка уходит из
+    /// ленты, анти-сигнал в промпт), «У меня уже есть» (страховка дедупа).
+    private var feedbackRow: some View {
+        VStack(spacing: 10) {
+            HStack(spacing: 10) {
+                Button {
+                    Task {
+                        await feedService.applyFeedback(
+                            suggestion, status: liked ? .shown : .liked)
+                    }
+                } label: {
+                    Label("Нравится", systemImage: liked ? "heart.fill" : "heart")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(liked ? .pink : .accentColor)
+
+                Button {
+                    Task {
+                        await feedService.applyFeedback(suggestion, status: .hidden)
+                        dismiss()
+                    }
+                } label: {
+                    Label("Не моё", systemImage: "xmark")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+            }
+
+            Button {
+                Task {
+                    await feedService.applyFeedback(suggestion, status: .owned)
+                    dismiss()
+                }
+            } label: {
+                Label("У меня уже есть", systemImage: "checkmark.circle")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+        }
+    }
+
+    // MARK: - «Открыть в…»
+
+    /// Apple Music — прямой `collectionViewUrl` (есть только у прошедших
+    /// валидацию); Яндекс.Музыка / Bandcamp / YouTube — поисковые URL
+    /// (`ExternalLinks`, без сети и ключей). Точные ссылки Odesli — этап 2.
+    private var openInSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Открыть в…")
+                .font(.headline)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())],
+                      spacing: 8) {
+                if let appleMusic = suggestion.appleMusicURL
+                    .flatMap(URL.init(string:)) {
+                    openButton("Apple Music", systemImage: "applelogo",
+                               url: appleMusic)
+                }
+                openButton("Яндекс.Музыка", systemImage: "magnifyingglass",
+                           url: ExternalLinks.yandexMusic(artist: suggestion.artist,
+                                                          album: suggestion.album))
+                openButton("Bandcamp", systemImage: "magnifyingglass",
+                           url: ExternalLinks.bandcamp(artist: suggestion.artist,
+                                                       album: suggestion.album))
+                openButton("YouTube", systemImage: "magnifyingglass",
+                           url: ExternalLinks.youtube(artist: suggestion.artist,
+                                                      album: suggestion.album))
+            }
+        }
+    }
+
+    private func openButton(_ title: String, systemImage: String, url: URL) -> some View {
+        Button {
+            openURL(url)
+        } label: {
+            Label(title, systemImage: systemImage)
+                .font(.subheadline)
+                .lineLimit(1)
+                .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.bordered)
     }
 }
