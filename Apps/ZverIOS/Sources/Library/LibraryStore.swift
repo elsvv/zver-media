@@ -431,6 +431,38 @@ final class LibraryStore: ObservableObject {
         }
     }
 
+    /// Переносимый ключ альбома для внешних потребителей (лента «Главной»,
+    /// история): относительный путь папки. См. albumKey(for:documentsURL:).
+    func albumKey(of group: AlbumGroup) -> String? {
+        Self.albumKey(for: group, documentsURL: documentsURL)
+    }
+
+    /// Альбом по переносимому ключу (линейный поиск — библиотека сотни групп).
+    func album(forKey key: String) -> AlbumGroup? {
+        albums.first { albumKey(of: $0) == key }
+    }
+
+    /// Последние прослушанные альбомы (различные, по свежести последнего
+    /// события) — локальная секция «Главной». История выключена/пуста → [].
+    func recentlyPlayedAlbums(limit: Int) async -> [AlbumGroup] {
+        guard let historyStore else { return [] }
+        let keys = await Task.detached(priority: .userInitiated) {
+            (try? historyStore.recentAlbumKeys(limit: limit)) ?? []
+        }.value
+        // Порядок ключей истории сохраняем (свежие первыми).
+        let byKey = Dictionary(uniqueKeysWithValues:
+            albums.compactMap { group in albumKey(of: group).map { ($0, group) } })
+        return keys.compactMap { byKey[$0] }
+    }
+
+    /// Агрегат прослушивания за период (сырьё промпта AI-ленты).
+    func listeningStats(since: Date) async -> ListeningStats? {
+        guard let historyStore else { return nil }
+        return await Task.detached(priority: .userInitiated) {
+            try? historyStore.listeningStats(since: since)
+        }.value
+    }
+
     /// Избранные альбомы в порядке библиотеки (для раздела «Избранное»).
     var favoriteAlbums: [AlbumGroup] {
         albums.filter { isFavorite(album: $0) }
