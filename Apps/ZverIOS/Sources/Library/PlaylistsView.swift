@@ -101,6 +101,16 @@ private struct AddToPlaylistMenuModifier: ViewModifier {
     func body(content: Content) -> some View {
         content
             .contextMenu {
+                // Избранное — первым пунктом: самое частое действие меню трека.
+                Button {
+                    Task { await store.toggleFavorite(track: track) }
+                } label: {
+                    if store.isFavorite(track: track) {
+                        Label("Убрать из избранного", systemImage: "heart.slash")
+                    } else {
+                        Label("В избранное", systemImage: "heart")
+                    }
+                }
                 Menu {
                     ForEach(store.playlists) { playlist in
                         Button(playlist.title) {

@@ -81,13 +81,19 @@ struct SearchView: View {
         }
     }
 
-    /// Уникальные артисты найденных треков по алфавиту
-    /// (пустой/пробельный тег — отсутствие артиста, в секцию не попадает).
+    /// Уникальные артисты найденных треков по алфавиту. Написания одного
+    /// артиста в разном регистре схлопываются в один пункт (ключ
+    /// `ArtistName.key`, показывается каноничное написание) — как в разделе
+    /// «Артисты». Треки без тега в секцию не попадают.
     private var artists: [String] {
-        Set(results.compactMap(\.artist).filter {
-            !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        })
-        .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+        var variants: [String: [String]] = [:]
+        for track in results {
+            guard let key = ArtistName.key(track.artist) else { continue }
+            variants[key, default: []].append(track.artist ?? "")
+        }
+        return variants.values
+            .map { ArtistName.canonical($0) }
+            .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
     }
 
     /// Полные группы альбомов библиотеки, чьи имена встречаются среди
@@ -100,11 +106,12 @@ struct SearchView: View {
         return store.albums.filter { names.contains($0.album) }
     }
 
-    /// Экран артиста: его альбомы из всей библиотеки
-    /// (та же логика, что в ArtistsView).
+    /// Экран артиста: его альбомы из всей библиотеки — по нормализованному
+    /// ключу, а не точному совпадению (та же логика, что в ArtistsView).
     private func albums(of artist: String) -> [AlbumGroup] {
-        store.albums.filter { group in
-            group.tracks.contains { $0.artist == artist }
+        let key = ArtistName.key(artist)
+        return store.albums.filter { group in
+            group.tracks.contains { ArtistName.key($0.artist) == key }
         }
     }
 
@@ -127,10 +134,14 @@ struct SearchView: View {
     }
 
     private func trackRow(_ track: Track) -> some View {
-        HStack {
+        let isCurrent = engine.isCurrent(track)
+        return HStack {
+            if isCurrent {
+                NowPlayingIndicator(isPlaying: engine.state == .playing)
+            }
             VStack(alignment: .leading, spacing: 2) {
                 Text(track.title)
-                    .foregroundStyle(.primary)
+                    .foregroundStyle(isCurrent ? AnyShapeStyle(.tint) : AnyShapeStyle(.primary))
                     .lineLimit(1)
                 if let artist = track.artist {
                     Text(artist)
