@@ -12,6 +12,8 @@ packages:
     path: ../../Packages/ZverTransport
   ZverStorage:
     path: ../../Packages/ZverStorage
+  ZverBrain:
+    path: ../../Packages/ZverBrain
 targets:
   ZverIOS:
     type: application
@@ -22,6 +24,7 @@ targets:
       - package: ZverMetadata
       - package: ZverTransport
       - package: ZverStorage
+      - package: ZverBrain
     settings:
       base:
         SWIFT_VERSION: "6.0"

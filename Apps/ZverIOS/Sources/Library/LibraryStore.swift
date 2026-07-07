@@ -14,7 +14,9 @@ import ZverMetadata
 /// с чтением/записью вне главного потока и republish после изменения.
 @MainActor
 final class LibraryStore: ObservableObject {
-    @Published private(set) var albums: [AlbumGroup] = []
+    @Published private(set) var albums: [AlbumGroup] = [] {
+        didSet { albumKeyIndex = nil }
+    }
     @Published private(set) var playlists: [Playlist] = []
     /// Избранное: ключи в каталожном формате (относительные от Documents —
     /// стабильны между реинсталлами, в отличие от абсолютных путей `Track.id`/
@@ -429,6 +431,49 @@ final class LibraryStore: ObservableObject {
             favoriteTrackKeys = fetched.tracks
             favoriteAlbumKeys = fetched.albums
         }
+    }
+
+    /// Переносимый ключ альбома для внешних потребителей (лента «Главной»,
+    /// история): относительный путь папки. См. albumKey(for:documentsURL:).
+    func albumKey(of group: AlbumGroup) -> String? {
+        Self.albumKey(for: group, documentsURL: documentsURL)
+    }
+
+    /// Ленивый индекс ключ → альбом. Сбрасывается при каждом publish albums
+    /// (didSet); строится по требованию. Нужен ленте «Главной»: резолв ключей
+    /// в рендер-пути, линейный поиск с нормализацией путей на каждый вызов —
+    /// десятки тысяч лишних вычислений на один проход body.
+    private var albumKeyIndex: [String: AlbumGroup]?
+
+    /// Альбом по переносимому ключу (через ленивый индекс).
+    func album(forKey key: String) -> AlbumGroup? {
+        if albumKeyIndex == nil {
+            albumKeyIndex = Dictionary(
+                albums.compactMap { group in albumKey(of: group).map { ($0, group) } },
+                // Ключ (путь папки) уникален на группу по построению; дубликат
+                // означал бы сломанный инвариант — не падаем, берём первую.
+                uniquingKeysWith: { first, _ in first })
+        }
+        return albumKeyIndex?[key]
+    }
+
+    /// Последние прослушанные альбомы (различные, по свежести последнего
+    /// события) — локальная секция «Главной». История выключена/пуста → [].
+    func recentlyPlayedAlbums(limit: Int) async -> [AlbumGroup] {
+        guard let historyStore else { return [] }
+        let keys = await Task.detached(priority: .userInitiated) {
+            (try? historyStore.recentAlbumKeys(limit: limit)) ?? []
+        }.value
+        // Порядок ключей истории сохраняем (свежие первыми).
+        return keys.compactMap { album(forKey: $0) }
+    }
+
+    /// Агрегат прослушивания за период (сырьё промпта AI-ленты).
+    func listeningStats(since: Date) async -> ListeningStats? {
+        guard let historyStore else { return nil }
+        return await Task.detached(priority: .userInitiated) {
+            try? historyStore.listeningStats(since: since)
+        }.value
     }
 
     /// Избранные альбомы в порядке библиотеки (для раздела «Избранное»).

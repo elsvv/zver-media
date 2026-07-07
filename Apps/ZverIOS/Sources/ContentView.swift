@@ -17,6 +17,10 @@ struct ContentView: View {
     // Пульт с Мака (этап 5): WS-сервер + pairing-хост + приём команд. Строится на
     // тех же engine/library; UI (тумблер/код/режим паузы) добавит S5-6.
     @StateObject private var remote: RemoteControlService
+    // «Интеллект» (LLM-рекомендации, этап «Главная+AI»): ключ/URL/модель в
+    // настройках; лента генерируется вручную и кэшируется на диске.
+    @StateObject private var brain: BrainAccount
+    @StateObject private var homeFeed: HomeFeedService
 
     init() {
         let catalog = LibraryStore.openCatalog()
@@ -50,10 +54,20 @@ struct ContentView: View {
         }
         _engine = StateObject(wrappedValue: engine)
         _remote = StateObject(wrappedValue: RemoteControlService(player: engine, library: library))
+        let brain = BrainAccount()
+        _brain = StateObject(wrappedValue: brain)
+        _homeFeed = StateObject(wrappedValue: HomeFeedService(library: library, account: brain))
     }
 
     var body: some View {
         TabView {
+            NavigationStack {
+                HomeView(store: library, engine: engine,
+                         feedService: homeFeed, account: brain)
+            }
+            .safeAreaInset(edge: .bottom, spacing: 0) { miniPlayer }
+            .tabItem { Label("Главная", systemImage: "house") }
+
             NavigationStack {
                 LibraryView(store: library, engine: engine)
             }
@@ -86,7 +100,7 @@ struct ContentView: View {
 
             NavigationStack {
                 SettingsView(account: account, store: library, backup: backup,
-                             remote: remote, player: engine)
+                             remote: remote, player: engine, brain: brain)
             }
             .safeAreaInset(edge: .bottom, spacing: 0) { miniPlayer }
             .tabItem { Label("Настройки", systemImage: "gearshape") }
