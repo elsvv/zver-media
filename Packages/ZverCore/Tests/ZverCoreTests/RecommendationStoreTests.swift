@@ -185,6 +185,22 @@ import Testing
         #expect(try store.shownKeys(since: Date(timeIntervalSince1970: 0)) == [key])
     }
 
+    @Test func shownKeysExcludesRequestedStatuses() throws {
+        // Дедуп ленты: показанное за 90 дней, КРОМЕ liked — их дозволено
+        // вернуть (дизайн «Предложка v2», шаг 5 пайплайна).
+        let (store, _) = try makeStore()
+        let likedKey = ReleaseNorm.key(artist: "A", album: "Alpha")
+        try store.recordShown(rec("A", "Alpha", at: 1_000))
+        try store.recordShown(rec("B", "Beta", at: 1_000))
+        try store.setStatus(normKey: likedKey, status: .liked,
+                            at: Date(timeIntervalSince1970: 2_000))
+
+        let keys = try store.shownKeys(since: Date(timeIntervalSince1970: 0),
+                                       excluding: [.liked])
+
+        #expect(keys == [ReleaseNorm.key(artist: "B", album: "Beta")])
+    }
+
     // MARK: - cacheLinks
 
     @Test func cacheLinksStoresJSONWithoutTouchingStatusOrDates() throws {

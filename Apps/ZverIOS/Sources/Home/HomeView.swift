@@ -75,10 +75,10 @@ struct HomeView: View {
             }
         } else {
             switch feedService.state {
-            case .loading:
+            case .loading, .validating:
                 VStack(spacing: 10) {
                     ProgressView()
-                    Text("Модель собирает ленту…")
+                    Text(progressLabel)
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
@@ -112,15 +112,24 @@ struct HomeView: View {
         }
     }
 
-    /// Инлайн-статус над живой лентой: спиннер во время генерации, ошибка —
-    /// баннером (старая лента остаётся рабочей).
+    /// Текст фазы генерации: сборка у модели или валидация кандидатов
+    /// через iTunes с прогрессом N/M.
+    private var progressLabel: String {
+        if case .validating(let done, let total) = feedService.state {
+            return "Проверяю рекомендации… \(done)/\(total)"
+        }
+        return "Модель собирает ленту…"
+    }
+
+    /// Инлайн-статус над живой лентой: спиннер во время генерации/валидации,
+    /// ошибка — баннером (старая лента остаётся рабочей).
     @ViewBuilder
     private var statusBanner: some View {
         switch feedService.state {
-        case .loading:
+        case .loading, .validating:
             HStack(spacing: 10) {
                 ProgressView()
-                Text("Модель собирает новую ленту…")
+                Text(progressLabel)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
@@ -225,7 +234,7 @@ struct HomeView: View {
                 } label: {
                     Label("Обновить рекомендации", systemImage: "sparkles")
                 }
-                .disabled(feedService.state == .loading)
+                .disabled(feedService.state.isBusy)
             } label: {
                 Image(systemName: "ellipsis.circle")
             }
@@ -271,9 +280,19 @@ struct ExternalSuggestionCard: View {
                 .lineLimit(1)
         }
         .task(id: suggestion.id) {
-            artwork = await ITunesArtworkFetcher.shared.artwork(
-                artist: suggestion.artist, album: suggestion.album)
+            artwork = await ITunesCatalog.shared.artwork(for: suggestion)
         }
+    }
+}
+
+extension ITunesCatalog {
+    /// Обложка рекомендации: по готовому `artworkURL` из валидации (быстро,
+    /// без второго похода в поиск); старый кэш ленты без него — через резолв.
+    func artwork(for suggestion: ExternalSuggestion) async -> UIImage? {
+        if let urlString = suggestion.artworkURL {
+            return await artwork(urlString: urlString)
+        }
+        return await artwork(artist: suggestion.artist, album: suggestion.album)
     }
 }
 
@@ -325,8 +344,7 @@ struct ExternalSuggestionSheet: View {
         }
         .presentationDetents([.medium, .large])
         .task(id: suggestion.id) {
-            artwork = await ITunesArtworkFetcher.shared.artwork(
-                artist: suggestion.artist, album: suggestion.album)
+            artwork = await ITunesCatalog.shared.artwork(for: suggestion)
         }
     }
 }

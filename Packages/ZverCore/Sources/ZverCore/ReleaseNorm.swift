@@ -17,6 +17,28 @@ public enum ReleaseNorm {
         normalize(artist) + "|" + strippingEditionTails(normalize(album))
     }
 
+    /// Fuzzy-матч двух написаний релиза (кандидат LLM против находки iTunes).
+    ///
+    /// Чистая функция валидации «Предложки v2»: обе стороны нормализуются как
+    /// в ``key(artist:album:)``, части сравниваются ПО ВКЛЮЧЕНИЮ — расширенное
+    /// переиздание («OK Computer OKNOTOK 1997 2017») или приписка «feat. …» у
+    /// артиста не рушат матч. Пустая нормализованная часть (артист «!!!»)
+    /// матчится только с такой же пустой — включение на пустой строке дало бы
+    /// матч с кем угодно.
+    public static func fuzzyMatches(artist: String, album: String,
+                                    otherArtist: String, otherAlbum: String) -> Bool {
+        partMatches(normalize(artist), normalize(otherArtist))
+            && partMatches(strippingEditionTails(normalize(album)),
+                           strippingEditionTails(normalize(otherAlbum)))
+    }
+
+    /// Матч одной нормализованной части: равенство ИЛИ включение непустых.
+    private static func partMatches(_ lhs: String, _ rhs: String) -> Bool {
+        if lhs == rhs { return true }
+        guard !lhs.isEmpty, !rhs.isEmpty else { return false }
+        return lhs.contains(rhs) || rhs.contains(lhs)
+    }
+
     // MARK: - Внутренности
 
     /// lowercase + срез диакритики + удаление пунктуации + схлопывание пробелов.

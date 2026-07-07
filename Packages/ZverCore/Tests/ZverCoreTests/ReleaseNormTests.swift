@@ -91,4 +91,55 @@ import Testing
         #expect(ReleaseNorm.key(artist: "ab", album: "c")
                 != ReleaseNorm.key(artist: "a", album: "bc"))
     }
+
+    // MARK: - Fuzzy-матч (валидация кандидатов через iTunes)
+
+    @Test func fuzzyMatchesExactPair() {
+        #expect(ReleaseNorm.fuzzyMatches(artist: "Radiohead", album: "OK Computer",
+                                         otherArtist: "Radiohead", otherAlbum: "OK Computer"))
+    }
+
+    @Test func fuzzyMatchesIgnoresCaseDiacriticsAndPunctuation() {
+        #expect(ReleaseNorm.fuzzyMatches(artist: "Sigur Ros", album: "Takk...",
+                                         otherArtist: "Sigur Rós", otherAlbum: "Takk"))
+        #expect(ReleaseNorm.fuzzyMatches(artist: "R.E.M.", album: "Up",
+                                         otherArtist: "REM", otherAlbum: "Up"))
+    }
+
+    @Test func fuzzyMatchesEditionTails() {
+        // LLM назвал базовое издание, iTunes нашёл Deluxe — тот же релиз.
+        #expect(ReleaseNorm.fuzzyMatches(
+            artist: "Radiohead", album: "OK Computer",
+            otherArtist: "Radiohead", otherAlbum: "OK Computer (Deluxe Edition)"))
+    }
+
+    @Test func fuzzyMatchesByInclusion() {
+        // «включение»: одна нормализованная строка содержит другую —
+        // расширенное переиздание или приписка «feat.» не рушат матч.
+        #expect(ReleaseNorm.fuzzyMatches(
+            artist: "Radiohead", album: "OK Computer",
+            otherArtist: "Radiohead", otherAlbum: "OK Computer OKNOTOK 1997 2017"))
+        #expect(ReleaseNorm.fuzzyMatches(
+            artist: "UNKLE", album: "Psyence Fiction",
+            otherArtist: "UNKLE feat. Thom Yorke", otherAlbum: "Psyence Fiction"))
+    }
+
+    @Test func fuzzyRejectsDifferentAlbum() {
+        #expect(!ReleaseNorm.fuzzyMatches(artist: "Radiohead", album: "OK Computer",
+                                          otherArtist: "Radiohead", otherAlbum: "Kid A"))
+    }
+
+    @Test func fuzzyRejectsDifferentArtist() {
+        #expect(!ReleaseNorm.fuzzyMatches(artist: "Radiohead", album: "OK Computer",
+                                          otherArtist: "Muse", otherAlbum: "OK Computer"))
+    }
+
+    @Test func fuzzyEmptyNormalizedPartMatchesOnlyEmpty() {
+        // «!!!» нормализуется в пустоту — включение на пустой строке дало бы
+        // матч с кем угодно; требуем равенства пустых.
+        #expect(ReleaseNorm.fuzzyMatches(artist: "!!!", album: "Louden Up Now",
+                                         otherArtist: "!!!", otherAlbum: "Louden Up Now"))
+        #expect(!ReleaseNorm.fuzzyMatches(artist: "!!!", album: "Louden Up Now",
+                                          otherArtist: "Muse", otherAlbum: "Louden Up Now"))
+    }
 }

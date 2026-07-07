@@ -158,13 +158,28 @@ public final class RecommendationStore: Sendable {
         }
     }
 
-    /// Ключи всего показанного с `since` (любой статус) — для дедупа ленты.
-    public func shownKeys(since: Date) throws -> Set<String> {
+    /// Ключи показанного с `since` — для дедупа ленты. По умолчанию любой
+    /// статус; `excluding` вычитает статусы (дизайн: показанное за 90 дней
+    /// КРОМЕ liked — понравившееся дозволено вернуть).
+    public func shownKeys(since: Date,
+                          excluding statuses: Set<RecommendationStatus> = []) throws -> Set<String> {
         try catalog.dbQueue.read { db in
-            try String.fetchSet(
+            if statuses.isEmpty {
+                return try String.fetchSet(
+                    db,
+                    sql: "SELECT normKey FROM recommendation WHERE shownAt >= ?",
+                    arguments: [since]
+                )
+            }
+            let placeholders = databaseQuestionMarks(count: statuses.count)
+            return try String.fetchSet(
                 db,
-                sql: "SELECT normKey FROM recommendation WHERE shownAt >= ?",
-                arguments: [since]
+                sql: """
+                SELECT normKey FROM recommendation
+                WHERE shownAt >= ? AND status NOT IN (\(placeholders))
+                """,
+                arguments: StatementArguments([since])
+                    + StatementArguments(statuses.map(\.rawValue).sorted())
             )
         }
     }
