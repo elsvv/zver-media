@@ -16,9 +16,18 @@ import ZverMetadata
 final class LibraryStore: ObservableObject {
     @Published private(set) var albums: [AlbumGroup] = []
     @Published private(set) var playlists: [Playlist] = []
+    /// Избранное: ключи в каталожном формате (относительные от Documents —
+    /// стабильны между реинсталлами, в отличие от абсолютных путей `Track.id`/
+    /// `AlbumGroup.id` с UUID контейнера). Публикуются для сердечек в рядах.
+    @Published private(set) var favoriteTrackKeys: Set<String> = []
+    @Published private(set) var favoriteAlbumKeys: Set<String> = []
 
     private let catalogStore: CatalogStore
     private let playlistStore: PlaylistStore
+    /// Сторы избранного и истории (та же БД каталога). nil — фичи выключены
+    /// (тесты/превью со старым инитом).
+    private let favoriteStore: FavoriteStore?
+    private let historyStore: PlayHistoryStore?
     private let documentsURL: URL
 
     /// Сервис облачного бэкапа (этап 4). Прокидывается извне после инициализации
@@ -34,9 +43,13 @@ final class LibraryStore: ObservableObject {
     private var didPublishCatalog = false
 
     init(catalogStore: CatalogStore, playlistStore: PlaylistStore,
+         favoriteStore: FavoriteStore? = nil,
+         historyStore: PlayHistoryStore? = nil,
          documentsURL: URL = .documentsDirectory) {
         self.catalogStore = catalogStore
         self.playlistStore = playlistStore
+        self.favoriteStore = favoriteStore
+        self.historyStore = historyStore
         self.documentsURL = documentsURL
     }
 
@@ -82,6 +95,7 @@ final class LibraryStore: ObservableObject {
         // чтобы подменю «В плейлист…» и раздел «Плейлисты» были готовы
         // сразу после старта.
         await refreshPlaylists()
+        await refreshFavorites()
 
         let rescanned = await Task.detached(priority: .userInitiated) { () -> [Track]? in
             do {
@@ -235,13 +249,30 @@ final class LibraryStore: ObservableObject {
     /// (сливая с существующим), рескан меняет отображаемое название. Идентичность
     /// (папка) не меняется.
     func renameAlbum(_ group: AlbumGroup, to newTitle: String) async {
-        let title = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !title.isEmpty,
+        await editAlbum(group, title: newTitle, artist: nil, year: nil)
+    }
+
+    /// Правка метадаты альбома на телефоне: название / артист альбома / год —
+    /// per-track override'ами в sidecar (пустое или неизменённое поле — не
+    /// трогаем), затем рескан накладывает overlay. Правки переживают реинсталл
+    /// и рескан (sidecar — источник правды), но перезаливка альбома с Мака
+    /// перезапишет sidecar правками Мака — осознанно (при синке Мак главнее).
+    /// Типичный кейс: артистом альбома подхватился feat.-гость — правим разом
+    /// во всех треках.
+    func editAlbum(_ group: AlbumGroup, title: String?, artist: String?, year: Int?) async {
+        let title = title?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let artist = artist?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasChanges = !(title ?? "").isEmpty || !(artist ?? "").isEmpty || year != nil
+        guard hasChanges,
               let folder = Self.albumFolderURL(for: group, documentsURL: documentsURL)
         else { return }
         let relPaths = group.tracks.map { Self.relativePathWithinAlbum($0.url, folder: folder) }
         await Task.detached(priority: .utility) {
-            Self.writeAlbumRename(folder: folder, trackRelPaths: relPaths, title: title)
+            Self.writeAlbumOverrides(folder: folder, trackRelPaths: relPaths) { override in
+                if let title, !title.isEmpty { override.album = title }
+                if let artist, !artist.isEmpty { override.artist = artist }
+                if let year { override.year = year }
+            }
         }.value
         await refresh()
     }
@@ -307,7 +338,13 @@ final class LibraryStore: ObservableObject {
         return path.hasPrefix(base + "/") ? String(path.dropFirst(base.count + 1)) : url.lastPathComponent
     }
 
-    private nonisolated static func writeAlbumRename(folder: URL, trackRelPaths: [String], title: String) {
+    /// Мёржит правку в sidecar альбома: читает существующий (или создаёт пустой),
+    /// применяет `mutate` к override'у КАЖДОГО трека и атомарно пишет обратно.
+    /// Прочие поля sidecar (обложка, описание, чужие override'ы) не трогаются.
+    private nonisolated static func writeAlbumOverrides(
+        folder: URL, trackRelPaths: [String],
+        mutate: (inout TrackOverride) -> Void
+    ) {
         let sidecarURL = folder.appendingPathComponent(AlbumSidecar.fileName)
         var sidecar: AlbumSidecar
         if let data = try? Data(contentsOf: sidecarURL),
@@ -318,13 +355,116 @@ final class LibraryStore: ObservableObject {
         }
         for rel in trackRelPaths {
             var override = sidecar.tracks[rel] ?? TrackOverride()
-            override.album = title
+            mutate(&override)
             sidecar.tracks[rel] = override
         }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         if let data = try? encoder.encode(sidecar) {
             try? data.write(to: sidecarURL, options: .atomic)
+        }
+    }
+
+    // MARK: - Избранное и история
+    //
+    // Ключи — в каталожном формате (относительные от Documents): abs-пути
+    // (`Track.id`, `AlbumGroup.id`) содержат UUID контейнера приложения и
+    // не переживают реинсталл, а избранное с историей — должны (та же БД,
+    // что у плейлистов, уезжает в облачный бэкап каталога).
+
+    /// Каталожный `trackKey` трека: относительный путь + `#cueIndex` у
+    /// cue-треков (зеркало `Track.id`, но переносимое). Трек вне Documents → nil.
+    nonisolated private static func trackKey(for track: Track, documentsURL: URL) -> String? {
+        guard let rel = relativePath(of: track.url, from: documentsURL) else { return nil }
+        if let cueIndex = track.cueIndex { return "\(rel)#\(cueIndex)" }
+        return rel
+    }
+
+    /// Переносимый ключ альбома: путь папки относительно Documents.
+    /// Группа «Без альбома» — её константное имя (тоже стабильно).
+    nonisolated private static func albumKey(for group: AlbumGroup, documentsURL: URL) -> String? {
+        guard group.id != AlbumGroup.noAlbumTitle else { return AlbumGroup.noAlbumTitle }
+        return relativePath(of: URL(fileURLWithPath: group.id), from: documentsURL)
+    }
+
+    func isFavorite(track: Track) -> Bool {
+        Self.trackKey(for: track, documentsURL: documentsURL)
+            .map(favoriteTrackKeys.contains) ?? false
+    }
+
+    func isFavorite(album group: AlbumGroup) -> Bool {
+        Self.albumKey(for: group, documentsURL: documentsURL)
+            .map(favoriteAlbumKeys.contains) ?? false
+    }
+
+    func toggleFavorite(track: Track) async {
+        guard let key = Self.trackKey(for: track, documentsURL: documentsURL) else { return }
+        await setFavorite(kind: .track, key: key, isFavorite: !favoriteTrackKeys.contains(key))
+    }
+
+    func toggleFavorite(album group: AlbumGroup) async {
+        guard let key = Self.albumKey(for: group, documentsURL: documentsURL) else { return }
+        await setFavorite(kind: .album, key: key, isFavorite: !favoriteAlbumKeys.contains(key))
+    }
+
+    private func setFavorite(kind: FavoriteKind, key: String, isFavorite: Bool) async {
+        guard let favoriteStore else { return }
+        await Task.detached(priority: .userInitiated) {
+            try? favoriteStore.setFavorite(kind: kind, key: key, isFavorite: isFavorite)
+        }.value
+        await refreshFavorites()
+    }
+
+    /// Перечитывает ключи избранного. Ошибка чтения не затирает опубликованное.
+    func refreshFavorites() async {
+        guard let favoriteStore else { return }
+        let fetched = await Task.detached(priority: .userInitiated) {
+            () -> (tracks: Set<String>, albums: Set<String>)? in
+            guard let tracks = try? favoriteStore.favoriteKeys(kind: .track),
+                  let albums = try? favoriteStore.favoriteKeys(kind: .album)
+            else { return nil }
+            return (tracks, albums)
+        }.value
+        if let fetched {
+            favoriteTrackKeys = fetched.tracks
+            favoriteAlbumKeys = fetched.albums
+        }
+    }
+
+    /// Избранные альбомы в порядке библиотеки (для раздела «Избранное»).
+    var favoriteAlbums: [AlbumGroup] {
+        albums.filter { isFavorite(album: $0) }
+    }
+
+    /// Избранные треки в порядке библиотеки (альбом → номер трека).
+    var favoriteTracks: [Track] {
+        albums.flatMap(\.tracks).filter { isFavorite(track: $0) }
+    }
+
+    /// Запись события истории (колбэк `PlayerEngine.onTrackPlayed`): снапшот
+    /// метадаты + переносимые ключи. События короче секунды не пишем — это
+    /// «пролистывание» очереди, не прослушивание (защита от мусора в истории).
+    func recordPlayEvent(track: Track, startedAt: Date,
+                         playedSeconds: Double, reason: PlaybackEndReason) {
+        guard let historyStore,
+              playedSeconds >= 1,
+              let trackKey = Self.trackKey(for: track, documentsURL: documentsURL)
+        else { return }
+        let albumKey = Self.relativePath(of: track.url.deletingLastPathComponent(),
+                                         from: documentsURL)
+        let event = PlayEvent(
+            trackKey: trackKey,
+            title: track.title,
+            artist: track.artist,
+            album: track.album,
+            albumKey: albumKey,
+            startedAt: startedAt,
+            playedSeconds: playedSeconds,
+            trackDuration: track.duration,
+            endReason: PlayEndReason(rawValue: reason.rawValue) ?? .stopped
+        )
+        Task.detached(priority: .utility) {
+            try? historyStore.record(event)
         }
     }
 

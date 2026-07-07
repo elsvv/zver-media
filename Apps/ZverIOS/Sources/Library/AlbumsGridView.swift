@@ -83,6 +83,15 @@ struct AlbumsGridView: View {
 
     @ViewBuilder
     private func menu(for group: AlbumGroup) -> some View {
+        Button {
+            Task { await store.toggleFavorite(album: group) }
+        } label: {
+            if store.isFavorite(album: group) {
+                Label("Убрать из избранного", systemImage: "heart.slash")
+            } else {
+                Label("В избранное", systemImage: "heart")
+            }
+        }
         Button { beginRename(group) } label: { Label("Переименовать", systemImage: "pencil") }
 
         if hasRemote(group) {
@@ -131,35 +140,8 @@ struct AlbumsGridView: View {
     }
 
     private func cell(for group: AlbumGroup) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            AlbumArtworkView(track: group.tracks.first, loader: engine.artworkLoader)
-                .overlay(alignment: .topTrailing) {
-                    if isRemoteOnly(group) {
-                        Image(systemName: "icloud")
-                            .font(.caption)
-                            .foregroundStyle(.white)
-                            .padding(5)
-                            .background(.black.opacity(0.35), in: Circle())
-                            .padding(6)
-                    }
-                }
-                // Только-в-облаке — приглушаем (нет на устройстве; тап-в-альбом → скачать).
-                .opacity(isRemoteOnly(group) ? 0.5 : 1)
-            Text(group.album)
-                .font(.callout)
-                .foregroundStyle(.primary)
-                .lineLimit(1)
-            Text(group.artist ?? ArtistsView.unknownArtistName)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-            if duplicatedTitles.contains(group.album), let first = group.tracks.first {
-                Text(TrackQuality.compact(for: first))
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-            }
-        }
+        AlbumTile(group: group, loader: engine.artworkLoader,
+                  showsQualityHint: duplicatedTitles.contains(group.album))
     }
 
     // MARK: - Тулбар и подтверждения
@@ -284,6 +266,54 @@ struct AlbumsGridView: View {
             if !seen.insert(group.album).inserted { dupes.insert(group.album) }
         }
         return dupes
+    }
+}
+
+/// Плитка альбома: обложка + название + артист (+ подсказка качества у
+/// версий-дубликатов). Общая для грида Альбомов, «Недавно добавленных» в
+/// Библиотеке и горизонтальных каруселей discovery. Альбомы только-в-облаке
+/// (все треки `remote`) приглушены и помечены бейджем ☁️.
+struct AlbumTile: View {
+    let group: AlbumGroup
+    let loader: ArtworkLoader
+    /// Показывать строку качества (24/96 и т.п.) — грид включает её у альбомов
+    /// с совпадающими названиями, чтобы различать версии/оцифровки.
+    var showsQualityHint = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            AlbumArtworkView(track: group.tracks.first, loader: loader)
+                .overlay(alignment: .topTrailing) {
+                    if isRemoteOnly {
+                        Image(systemName: "icloud")
+                            .font(.caption)
+                            .foregroundStyle(.white)
+                            .padding(5)
+                            .background(.black.opacity(0.35), in: Circle())
+                            .padding(6)
+                    }
+                }
+                // Только-в-облаке — приглушаем (нет на устройстве; тап-в-альбом → скачать).
+                .opacity(isRemoteOnly ? 0.5 : 1)
+            Text(group.album)
+                .font(.callout)
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+            Text(group.artist ?? ArtistsView.unknownArtistName)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            if showsQualityHint, let first = group.tracks.first {
+                Text(TrackQuality.compact(for: first))
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            }
+        }
+    }
+
+    private var isRemoteOnly: Bool {
+        !group.tracks.isEmpty && group.tracks.allSatisfy { $0.fileState == .remote }
     }
 }
 

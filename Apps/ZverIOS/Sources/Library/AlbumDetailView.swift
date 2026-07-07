@@ -18,8 +18,7 @@ struct AlbumDetailView: View {
 
     @Environment(\.dismiss) private var dismiss
     @State private var pending: PendingKind?
-    @State private var isRenaming = false
-    @State private var renameText = ""
+    @State private var isEditing = false
 
     private enum PendingKind: Identifiable {
         case device, cloud, everywhere, local
@@ -60,6 +59,26 @@ struct AlbumDetailView: View {
                 }
             }
 
+            // Discovery: карусели родственных альбомов под списком треков —
+            // доскроллил до конца и находишь, что послушать дальше. Один ряд
+            // на прозрачном фоне, во всю ширину (отступы внутри карусели).
+            if !moreFromArtist.isEmpty || !sameYear.isEmpty {
+                Section {
+                    VStack(alignment: .leading, spacing: 24) {
+                        AlbumCarousel(title: moreFromArtistTitle,
+                                      albums: moreFromArtist,
+                                      store: store, engine: engine)
+                        AlbumCarousel(title: "Из того же года",
+                                      albums: sameYear,
+                                      store: store, engine: engine)
+                    }
+                    .padding(.top, 16)
+                    .listRowInsets(EdgeInsets())
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
+                }
+            }
+
             // Освобождаем последний трек из-под мини-плеера. Он висит через
             // ContentView `.safeAreaInset(edge:.bottom)`, но в `.plain`-списке
             // на протолкнутом экране нижний inset до последнего ряда доходит
@@ -84,10 +103,8 @@ struct AlbumDetailView: View {
             confirmButton(for: kind)
             Button("Отмена", role: .cancel) {}
         }
-        .alert("Переименовать альбом", isPresented: $isRenaming) {
-            TextField("Название", text: $renameText)
-            Button("Сохранить") { Task { await store.renameAlbum(group, to: renameText) } }
-            Button("Отмена", role: .cancel) {}
+        .sheet(isPresented: $isEditing) {
+            AlbumEditSheet(group: group, store: store)
         }
     }
 
@@ -123,6 +140,8 @@ struct AlbumDetailView: View {
         AlbumTrackRow(
             track: track,
             fallbackNumber: fallback,
+            isCurrent: engine.isCurrent(track),
+            isPlaying: engine.state == .playing,
             store: store,
             onPlay: { play(at: globalIndex, track: track) }
         )
@@ -206,6 +225,21 @@ struct AlbumDetailView: View {
             .buttonStyle(.plain)
             .disabled(!hasRemoteTracks)
             .accessibilityLabel("Скачать альбом")
+
+            Button {
+                Task { await store.toggleFavorite(album: group) }
+            } label: {
+                Image(systemName: store.isFavorite(album: group) ? "heart.fill" : "heart")
+                    .font(.title3)
+                    .foregroundStyle(store.isFavorite(album: group)
+                                     ? AnyShapeStyle(.tint) : AnyShapeStyle(.primary))
+                    .frame(width: 52, height: 52)
+                    .background(Color(uiColor: .secondarySystemFill), in: Circle())
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(store.isFavorite(album: group)
+                                ? "Убрать альбом из избранного" : "Альбом в избранное")
         }
     }
 
@@ -245,10 +279,9 @@ struct AlbumDetailView: View {
         ToolbarItem(placement: .topBarTrailing) {
             Menu {
                 Button {
-                    renameText = group.album
-                    isRenaming = true
+                    isEditing = true
                 } label: {
-                    Label("Переименовать", systemImage: "pencil")
+                    Label("Править альбом", systemImage: "pencil")
                 }
                 if hasRemoteTracks {
                     Button { downloadRemoteTracks() } label: {
@@ -347,6 +380,38 @@ struct AlbumDetailView: View {
         Task { await store.downloadAlbums([group]) }
     }
 
+    // MARK: - Discovery
+
+    /// Другие альбомы этого артиста (по нормализованному ключу — регистр
+    /// написания не плодит артистов), кроме текущего. Пусто у альбомов без
+    /// артиста и у «Без альбома».
+    private var moreFromArtist: [AlbumGroup] {
+        guard group.id != AlbumGroup.noAlbumTitle,
+              let key = ArtistName.key(group.artist) else { return [] }
+        return store.albums.filter { candidate in
+            candidate.id != group.id && candidate.id != AlbumGroup.noAlbumTitle
+                && candidate.tracks.contains { ArtistName.key($0.artist) == key }
+        }
+    }
+
+    private var moreFromArtistTitle: String {
+        "Ещё от \(group.artist ?? ArtistsView.unknownArtistName)"
+    }
+
+    /// Альбомы того же года (минус сам альбом и уже показанные «Ещё от
+    /// артиста»). Секция осмысленна от трёх штук — иначе скрыта.
+    private var sameYear: [AlbumGroup] {
+        guard group.id != AlbumGroup.noAlbumTitle,
+              let year = group.tracks.compactMap(\.year).first else { return [] }
+        let shown = Set(moreFromArtist.map(\.id))
+        let matches = store.albums.filter { candidate in
+            candidate.id != group.id && candidate.id != AlbumGroup.noAlbumTitle
+                && !shown.contains(candidate.id)
+                && candidate.tracks.compactMap(\.year).first == year
+        }
+        return matches.count >= 3 ? matches : []
+    }
+
     /// «2003 • 24 бит • 96 кГц • FLAC» — год (если есть) + числовое качество и
     /// кодек первого трека (метаданные альбома консистентны по трекам).
     private var metadataLine: String? {
@@ -383,6 +448,9 @@ struct AlbumDetailView: View {
 private struct AlbumTrackRow: View {
     let track: Track
     let fallbackNumber: Int
+    /// Трек — текущий в очереди: вместо номера — индикатор, название — акцентом.
+    let isCurrent: Bool
+    let isPlaying: Bool
     @ObservedObject var store: LibraryStore
     let onPlay: () -> Void
 
@@ -394,14 +462,27 @@ private struct AlbumTrackRow: View {
             // Основная зона (номер + название + бейдж) — свой tap-таргет на play,
             // отдельно от меню «…», чтобы тапы не пересекались (как транспорт).
             HStack(spacing: 12) {
-                Text(String(track.trackNumber ?? fallbackNumber))
-                    .font(.callout.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .frame(minWidth: 24, alignment: .trailing)
+                // Колонка номера фиксированной ширины: у текущего трека вместо
+                // номера — анимированный индикатор, ряды не «прыгают».
+                Group {
+                    if isCurrent {
+                        NowPlayingIndicator(isPlaying: isPlaying)
+                    } else {
+                        Text(String(track.trackNumber ?? fallbackNumber))
+                            .font(.callout.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .frame(minWidth: 24, alignment: .trailing)
                 Text(track.title)
-                    .foregroundStyle(.primary)
+                    .foregroundStyle(isCurrent ? AnyShapeStyle(.tint) : AnyShapeStyle(.primary))
                     .lineLimit(1)
                 Spacer(minLength: 8)
+                if store.isFavorite(track: track) {
+                    Image(systemName: "heart.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.tint)
+                }
                 TrackCloudBadge(track: track)
             }
             .contentShape(Rectangle())
@@ -425,6 +506,15 @@ private struct AlbumTrackRow: View {
 
     private var rowMenu: some View {
         Menu {
+            Button {
+                Task { await store.toggleFavorite(track: track) }
+            } label: {
+                if store.isFavorite(track: track) {
+                    Label("Убрать из избранного", systemImage: "heart.slash")
+                } else {
+                    Label("В избранное", systemImage: "heart")
+                }
+            }
             cloudMenuItems
             playlistMenu
         } label: {

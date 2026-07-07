@@ -3,6 +3,13 @@ import Combine
 import UIKit
 import ZverCore
 
+/// Чем закончилось воспроизведение трека — для истории прослушивания.
+enum PlaybackEndReason: String, Sendable {
+    case finished   // дослушан до конца (в т.ч. gapless-стык)
+    case skipped    // переключен пользователем (next/previous/новая очередь)
+    case stopped    // воспроизведение остановлено (конец очереди, сбой)
+}
+
 @MainActor
 final class PlayerEngine: ObservableObject {
     enum State: Equatable { case idle, playing, paused }
@@ -60,6 +67,16 @@ final class PlayerEngine: ObservableObject {
     private var timeObserver: Timer?
     private let session: AudioSessionControlling
     private let nowPlaying = NowPlayingService()
+
+    /// История прослушивания: колбэк на каждое завершение трека
+    /// (трек, когда начали, сколько секунд сыграло, чем закончилось).
+    /// Движок не знает про каталог — запись в БД делает подписчик
+    /// (LibraryStore, см. ContentView). nil — история не пишется.
+    var onTrackPlayed: ((Track, Date, Double, PlaybackEndReason) -> Void)?
+
+    /// Текущая «сессия» трека для истории: что играет и когда начали.
+    /// Начинается в loadAndPlay/gapless-стыке, закрывается endPlaySession.
+    private var playSession: (track: Track, startedAt: Date)?
 
     /// Общий кэш обложек: им же пользуются MiniPlayerBar и PlayerScreen.
     let artworkLoader = ArtworkLoader()
@@ -369,7 +386,23 @@ final class PlayerEngine: ObservableObject {
         return (clampedStart, AVAudioFrameCount(count))
     }
 
+    /// Закрывает текущую сессию истории (если есть): наружу уходит событие
+    /// с фактически проигранными секундами. Для дослушанного трека позиция —
+    /// его полная длительность (currentTime на стыке уже склямплен к ней).
+    private func endPlaySession(_ reason: PlaybackEndReason) {
+        guard let session = playSession else { return }
+        playSession = nil
+        let played = reason == .finished ? session.track.duration : currentTime
+        onTrackPlayed?(session.track, session.startedAt, played, reason)
+    }
+
     private func loadAndPlay(_ track: Track) {
+        // Прошлый трек уступает место по команде пользователя (тап по другому
+        // треку, next/previous): дослушанный закрыт в handleTrackFinished,
+        // здесь закрываются только прерванные. Затем открываем новую сессию.
+        endPlaySession(.skipped)
+        playSession = (track, Date())
+
         generation &+= 1
         let gen = generation
 
@@ -510,6 +543,9 @@ final class PlayerEngine: ObservableObject {
 
     private func handleTrackFinished(generation gen: Int) {
         guard gen == generation else { return }
+        // Трек дослушан до конца — фиксируем ДО перехода дальше: и gapless-путь
+        // ниже, и next() → loadAndPlay открывают новую сессию поверх.
+        endPlaySession(.finished)
         guard let nextFile = prescheduledFile else {
             next()
             return
@@ -535,6 +571,11 @@ final class PlayerEngine: ObservableObject {
             startFrame = 0
         }
         currentTime = 0
+        // Gapless-стык: следующий трек уже звучит — открываем его сессию
+        // (дослушанный закрыт выше, до бухгалтерии перехода).
+        if let track = queue.current {
+            playSession = (track, Date())
+        }
         updateNowPlaying()
         if let track = queue.current {
             refreshArtwork(for: track)
@@ -543,6 +584,9 @@ final class PlayerEngine: ObservableObject {
     }
 
     private func stopPlayback() {
+        // Конец очереди/сбой: последний трек handleTrackFinished уже закрыл как
+        // дослушанный; прерванный на середине (сбой загрузки) уходит как stopped.
+        endPlaySession(.stopped)
         generation &+= 1
         keepAlive.stop()
         player.stop()

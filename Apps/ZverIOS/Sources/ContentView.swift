@@ -25,7 +25,9 @@ struct ContentView: View {
         _account = StateObject(wrappedValue: account)
         let library = LibraryStore(
             catalogStore: catalogStore,
-            playlistStore: PlaylistStore(catalog: catalog)
+            playlistStore: PlaylistStore(catalog: catalog),
+            favoriteStore: FavoriteStore(catalog: catalog),
+            historyStore: PlayHistoryStore(catalog: catalog)
         )
         let backup = BackupService(
             catalogStore: catalogStore,
@@ -39,6 +41,13 @@ struct ContentView: View {
         // Пульт держит слабые ссылки на engine/library — оба живут весь сеанс как
         // @StateObject. Сервер не запускается, пока пользователь не включит тумблер.
         let engine = PlayerEngine()
+        // История прослушивания: движок отдаёт события (что играло, сколько,
+        // чем закончилось), LibraryStore превращает их в строки playEvent
+        // с переносимыми ключами. Оба живут весь сеанс как @StateObject.
+        engine.onTrackPlayed = { [weak library] track, startedAt, played, reason in
+            library?.recordPlayEvent(track: track, startedAt: startedAt,
+                                     playedSeconds: played, reason: reason)
+        }
         _engine = StateObject(wrappedValue: engine)
         _remote = StateObject(wrappedValue: RemoteControlService(player: engine, library: library))
     }

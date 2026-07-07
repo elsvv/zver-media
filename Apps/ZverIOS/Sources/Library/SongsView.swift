@@ -47,9 +47,13 @@ struct SongsView: View {
     }
 
     private func trackRow(_ track: Track) -> some View {
-        HStack(spacing: 8) {
+        let isCurrent = engine.isCurrent(track)
+        return HStack(spacing: 8) {
+            if isCurrent {
+                NowPlayingIndicator(isPlaying: engine.state == .playing)
+            }
             Text(track.title)
-                .foregroundStyle(.primary)
+                .foregroundStyle(isCurrent ? AnyShapeStyle(.tint) : AnyShapeStyle(.primary))
                 .lineLimit(1)
             Spacer()
             TrackCloudBadge(track: track)

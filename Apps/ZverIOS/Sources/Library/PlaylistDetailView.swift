@@ -103,14 +103,23 @@ struct PlaylistDetailView: View {
     }
 
     private func trackRow(_ track: Track, position: Int) -> some View {
-        HStack(spacing: 12) {
-            Text(String(position))
-                .font(.callout.monospacedDigit())
-                .foregroundStyle(.secondary)
-                .frame(minWidth: 24, alignment: .trailing)
+        let isCurrent = engine.isCurrent(track)
+        return HStack(spacing: 12) {
+            // Колонка позиции: у текущего трека — индикатор вместо номера
+            // (та же ширина, ряды не «прыгают» — как на экране альбома).
+            Group {
+                if isCurrent {
+                    NowPlayingIndicator(isPlaying: engine.state == .playing)
+                } else {
+                    Text(String(position))
+                        .font(.callout.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(minWidth: 24, alignment: .trailing)
             VStack(alignment: .leading, spacing: 2) {
                 Text(track.title)
-                    .foregroundStyle(.primary)
+                    .foregroundStyle(isCurrent ? AnyShapeStyle(.tint) : AnyShapeStyle(.primary))
                     .lineLimit(1)
                 if let artist = track.artist {
                     Text(artist)
