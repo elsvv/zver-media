@@ -17,8 +17,21 @@ struct ImportHomeView: View {
     let rescan: @MainActor () async -> Void
     let showBanner: @MainActor (String) -> Void
 
+    /// Владелец скачиваний webview (Bandcamp): живёт на уровне стека «Импорта», а не
+    /// вкладки webview, — плашка прогресса видна отсюда, из селектора, и переживает
+    /// уход с экрана Bandcamp назад в список.
+    @StateObject private var downloadCenter: WebDownloadCenter
+
     @State private var isPickingFiles = false
     @State private var isImporting = false
+
+    init(rescan: @escaping @MainActor () async -> Void,
+         showBanner: @escaping @MainActor (String) -> Void) {
+        self.rescan = rescan
+        self.showBanner = showBanner
+        _downloadCenter = StateObject(
+            wrappedValue: WebDownloadCenter(rescan: rescan, showBanner: showBanner))
+    }
 
     var body: some View {
         List {
@@ -30,7 +43,7 @@ struct ImportHomeView: View {
                               subtitle: "Альбомы из очереди на Маке по Wi-Fi")
                 }
                 NavigationLink {
-                    BandcampImportView()
+                    BandcampImportView(center: downloadCenter)
                 } label: {
                     sourceRow("Bandcamp", systemImage: "cart",
                               subtitle: "Купленные и бесплатные релизы во FLAC")
@@ -64,6 +77,11 @@ struct ImportHomeView: View {
             handlePick(result)
         }
         .overlay { importingOverlay }
+        // Плашка прогресса скачиваний Bandcamp видна прямо из селектора источников
+        // (центр живёт на уровне стека, а не вкладки webview).
+        .safeAreaInset(edge: .bottom) {
+            WebDownloadsPlate(center: downloadCenter)
+        }
     }
 
     // MARK: - «Из файлов»
