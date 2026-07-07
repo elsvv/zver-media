@@ -450,8 +450,18 @@ final class LibraryStore: ObservableObject {
               playedSeconds >= 1,
               let trackKey = Self.trackKey(for: track, documentsURL: documentsURL)
         else { return }
-        let albumKey = Self.relativePath(of: track.url.deletingLastPathComponent(),
-                                         from: documentsURL)
+        // Идентичность альбома — как у AlbumGroup (папка с учётом сворачивания
+        // диск-подпапок CD1/CD2), иначе albumKey истории не сджойнится с
+        // AlbumGroup.id и избранным. У треков без тега альбома albumKey = nil
+        // (спека: папка одиночек — не «альбом» для «Недавно прослушанного»).
+        let albumKey: String?
+        if track.album?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+            albumKey = Self.relativePath(
+                of: URL(fileURLWithPath: AlbumGroup.albumFolderPath(for: track)),
+                from: documentsURL)
+        } else {
+            albumKey = nil
+        }
         let event = PlayEvent(
             trackKey: trackKey,
             title: track.title,

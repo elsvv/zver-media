@@ -406,19 +406,29 @@ final class PlayerEngine: ObservableObject {
         generation &+= 1
         let gen = generation
 
-        // 1. Открыть файл; ошибка → пропустить трек.
+        // 1. Открыть файл; ошибка → пропустить трек. Сессию истории закрываем
+        // ДО next(): трек не сыграл ни сэмпла, а currentTime на этом пути ещё
+        // держит позицию предыдущего трека — без сброса следующий
+        // endPlaySession(.skipped) записал бы фантомное «прослушивание»
+        // (offload-нутый remote или битый файл засчитался бы целиком).
         let loadedFile: AVAudioFile
         do {
             loadedFile = try AVAudioFile(forReading: track.url)
         } catch {
+            playSession = nil
             next()
             return
         }
         file = loadedFile
         // Диапазон трека в контейнере (для cue — вырезка; для обычного — весь файл).
         let (segStart, segCount) = segmentRange(for: track, in: loadedFile)
-        // Пустой сегмент (битые границы) — не зациклиться на нём, идём дальше.
-        guard segCount > 0 else { next(); return }
+        // Пустой сегмент (битые границы) — не зациклиться на нём, идём дальше
+        // (сессию тоже снять: трек не играл, см. путь ошибки открытия выше).
+        guard segCount > 0 else {
+            playSession = nil
+            next()
+            return
+        }
         segStartFrame = segStart
         segFrameCount = segCount
         startFrame = segStart

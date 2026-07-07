@@ -62,22 +62,7 @@ struct AlbumDetailView: View {
             // Discovery: карусели родственных альбомов под списком треков —
             // доскроллил до конца и находишь, что послушать дальше. Один ряд
             // на прозрачном фоне, во всю ширину (отступы внутри карусели).
-            if !moreFromArtist.isEmpty || !sameYear.isEmpty {
-                Section {
-                    VStack(alignment: .leading, spacing: 24) {
-                        AlbumCarousel(title: moreFromArtistTitle,
-                                      albums: moreFromArtist,
-                                      store: store, engine: engine)
-                        AlbumCarousel(title: "Из того же года",
-                                      albums: sameYear,
-                                      store: store, engine: engine)
-                    }
-                    .padding(.top, 16)
-                    .listRowInsets(EdgeInsets())
-                    .listRowSeparator(.hidden)
-                    .listRowBackground(Color.clear)
-                }
-            }
+            discoverySection
 
             // Освобождаем последний трек из-под мини-плеера. Он висит через
             // ContentView `.safeAreaInset(edge:.bottom)`, но в `.plain`-списке
@@ -382,6 +367,32 @@ struct AlbumDetailView: View {
 
     // MARK: - Discovery
 
+    /// Секция discovery целиком: оба списка считаются РОВНО ОДИН РАЗ за рендер
+    /// (view наблюдает engine ради подсветки трека и ре-рендерится каждые 0.5с
+    /// тика currentTime — раздельные computed-свойства проходили бы по всем
+    /// альбомам несколько раз за проход body).
+    @ViewBuilder
+    private var discoverySection: some View {
+        let more = moreFromArtist
+        let year = sameYear(excluding: Set(more.map(\.id)))
+        if !more.isEmpty || !year.isEmpty {
+            Section {
+                VStack(alignment: .leading, spacing: 24) {
+                    AlbumCarousel(title: "Ещё от \(group.artist ?? ArtistsView.unknownArtistName)",
+                                  albums: more,
+                                  store: store, engine: engine)
+                    AlbumCarousel(title: "Из того же года",
+                                  albums: year,
+                                  store: store, engine: engine)
+                }
+                .padding(.top, 16)
+                .listRowInsets(EdgeInsets())
+                .listRowSeparator(.hidden)
+                .listRowBackground(Color.clear)
+            }
+        }
+    }
+
     /// Другие альбомы этого артиста (по нормализованному ключу — регистр
     /// написания не плодит артистов), кроме текущего. Пусто у альбомов без
     /// артиста и у «Без альбома».
@@ -394,16 +405,11 @@ struct AlbumDetailView: View {
         }
     }
 
-    private var moreFromArtistTitle: String {
-        "Ещё от \(group.artist ?? ArtistsView.unknownArtistName)"
-    }
-
-    /// Альбомы того же года (минус сам альбом и уже показанные «Ещё от
-    /// артиста»). Секция осмысленна от трёх штук — иначе скрыта.
-    private var sameYear: [AlbumGroup] {
+    /// Альбомы того же года (минус сам альбом и уже показанные `excluding`).
+    /// Секция осмысленна от трёх штук — иначе скрыта.
+    private func sameYear(excluding shown: Set<String>) -> [AlbumGroup] {
         guard group.id != AlbumGroup.noAlbumTitle,
               let year = group.tracks.compactMap(\.year).first else { return [] }
-        let shown = Set(moreFromArtist.map(\.id))
         let matches = store.albums.filter { candidate in
             candidate.id != group.id && candidate.id != AlbumGroup.noAlbumTitle
                 && !shown.contains(candidate.id)

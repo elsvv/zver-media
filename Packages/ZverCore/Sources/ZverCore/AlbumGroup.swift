@@ -137,7 +137,11 @@ public struct AlbumGroup: Identifiable, Equatable, Sendable {
     /// учёта регистра) с именем его непосредственной папки (папка-диск `CD1`/
     /// `Side A`), альбомом считаем РОДИТЕЛЬСКУЮ папку — так диски-подпапки
     /// сворачиваются в один альбом, а не плодят по альбому на диск.
-    private static func albumFolderPath(for track: Track) -> String {
+    ///
+    /// Публичный: та же идентичность нужна вне группировки (например, `albumKey`
+    /// событий истории обязан совпадать с `AlbumGroup.id`, иначе история
+    /// дробила бы много-дисковый альбом по папкам-дискам).
+    public static func albumFolderPath(for track: Track) -> String {
         let parent = track.url.deletingLastPathComponent().standardizedFileURL
         if let disc = track.discLabel,
            parent.lastPathComponent.caseInsensitiveCompare(disc) == .orderedSame {
