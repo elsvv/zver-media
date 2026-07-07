@@ -102,6 +102,30 @@ public struct AlbumImporter: Sendable {
         return results
     }
 
+    /// Импортирует смешанный набор выбранных файлов (`fileImporter` источника «Из
+    /// файлов»): zip-архивы уходят каждый в `importArchive` (свой альбом(ы)), всё
+    /// остальное — одним пакетом в `importFiles` (россыпь группируется по тегам).
+    /// Результаты объединяются: сперва альбомы из архивов (в порядке `urls`), затем из
+    /// россыпи. Источники удаляются после успеха своими методами; на ошибке любого шага
+    /// исключение пробрасывается наверх (уже разложенные альбомы остаются, повтор
+    /// идемпотентен).
+    @discardableResult
+    public func importPicked(_ urls: [URL]) async throws -> [ImportResult] {
+        var results: [ImportResult] = []
+        var loose: [URL] = []
+        for url in urls {
+            if url.pathExtension.lowercased() == "zip" {
+                results += try await importArchive(url)
+            } else {
+                loose.append(url)
+            }
+        }
+        if !loose.isEmpty {
+            results += try await importFiles(loose)
+        }
+        return results
+    }
+
     // MARK: - Группировка
 
     /// Способ раскладки файлов группы в папке альбома.

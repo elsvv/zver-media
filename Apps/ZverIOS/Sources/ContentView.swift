@@ -104,13 +104,15 @@ struct ContentView: View {
             .tabItem { Label("Поиск", systemImage: "magnifyingglass") }
 
             NavigationStack {
-                // Рескан каталога после импорта альбома: reconcile подхватит
-                // правки из sidecar и добавит новые треки в библиотеку. Затем —
-                // автобэкап новых local-треков в облако (если залогинены).
-                MacImportView(rescan: { await refreshAndBackup() })
+                // Селектор источников импорта (Мак / Bandcamp / IA / Из файлов).
+                // rescan — reconcile каталога после раскладки альбома (правки из
+                // sidecar + новые треки) с последующим автобэкапом; раздаётся
+                // источникам. showBanner — общая плашка-итог поверх табов.
+                ImportHomeView(rescan: { await refreshAndBackup() },
+                               showBanner: { text in showBanner(text) })
             }
             .safeAreaInset(edge: .bottom, spacing: 0) { miniPlayer }
-            .tabItem { Label("Импорт", systemImage: "laptopcomputer.and.arrow.down") }
+            .tabItem { Label("Импорт", systemImage: "square.and.arrow.down") }
 
             NavigationStack {
                 SettingsView(account: account, store: library, backup: backup,
@@ -136,7 +138,7 @@ struct ContentView: View {
         do {
             let results = try await OpenInImporter.importOpened(url, libraryRoot: libraryRoot)
             await refreshAndBackup()
-            showBanner(Self.bannerText(for: results))
+            showBanner(ImportHomeView.bannerText(for: results))
         } catch {
             showBanner("Импорт не удался")
         }
@@ -150,18 +152,6 @@ struct ContentView: View {
         if account.isAuthorized, autoBackupNewAlbums {
             await backup.backupAwaitingTracks()
         }
-    }
-
-    /// Текст баннера по результату импорта: «Импортирован <артист — альбом>» для
-    /// одного альбома; для нескольких — их число; пустой результат — «Нечего
-    /// импортировать» (в файле не нашлось аудио).
-    private static func bannerText(for results: [ImportResult]) -> String {
-        guard let first = results.first else { return "Нечего импортировать" }
-        if results.count == 1 {
-            let name = first.artist.map { "\($0) — \(first.album)" } ?? first.album
-            return "Импортирован \(name)"
-        }
-        return "Импортировано альбомов: \(results.count)"
     }
 
     @MainActor

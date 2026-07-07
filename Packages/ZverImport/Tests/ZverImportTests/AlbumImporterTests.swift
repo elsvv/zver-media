@@ -300,4 +300,49 @@ import ZIPFoundation
         #expect(exists(library.appendingPathComponent("Зверь - Фикстуры (2024)"), "01.flac"))
         #expect(exists(library.appendingPathComponent("Микс"), "02.flac"))
     }
+
+    // MARK: - importPicked: смешанный набор (zip + россыпь)
+
+    @Test func importPickedRoutesZipsAndLooseFilesTogether() async throws {
+        let sandbox = try makeSandbox()
+        let library = sandbox.appendingPathComponent("Library")
+        // Архив в бэндкэмповском формате имени (файл в корне, без тега ALBUM →
+        // фоллбэк на имя zip).
+        let zip = sandbox.appendingPathComponent("Группа - Демо.zip")
+        try makeArchive(at: zip, files: [
+            ("song.flac", try fixtureData("notags.flac")),
+        ])
+        // Россыпь: два трека с тегами → отдельный альбом, сгруппированный по тегам.
+        let drop = sandbox.appendingPathComponent("drop")
+        let t1 = try copyFixture("tagged_16_44.flac", to: drop, as: "01.flac")
+        let t2 = try copyFixture("hires_24_96.flac", to: drop, as: "02.flac")
+
+        let results = try await AlbumImporter(libraryRoot: library)
+            .importPicked([zip, t1, t2])
+
+        // Сначала альбом(ы) архива (в порядке urls), затем россыпь.
+        #expect(results.count == 2)
+        #expect(results.first?.album == "Группа - Демо")
+        #expect(Set(results.map(\.album)) == ["Группа - Демо", "Фикстуры"])
+
+        #expect(exists(library.appendingPathComponent("Группа - Демо"), "song.flac"))
+        let tagged = library.appendingPathComponent("Зверь - Фикстуры (2024)")
+        #expect(exists(tagged, "01.flac"))
+        #expect(exists(tagged, "02.flac"))
+        // Источники удалены после успеха: и zip, и staging-копии россыпи.
+        #expect(!exists(zip))
+        #expect(!exists(t1))
+        #expect(!exists(t2))
+    }
+
+    @Test func importPickedReturnsEmptyForNoURLs() async throws {
+        let sandbox = try makeSandbox()
+        let library = sandbox.appendingPathComponent("Library")
+
+        let results = try await AlbumImporter(libraryRoot: library).importPicked([])
+
+        #expect(results.isEmpty)
+        // Пустой ввод не создаёт библиотеку.
+        #expect(!exists(library))
+    }
 }
