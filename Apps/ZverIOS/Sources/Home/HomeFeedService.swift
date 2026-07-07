@@ -77,6 +77,11 @@ final class HomeFeedService: ObservableObject {
             state = .failed("Создай профиль с ключом в Настройках → ИИ.")
             return
         }
+        // Снимаем ВСЁ от активного профиля ДО первого await: если пользователь
+        // переключит профиль во время сборки снапшота, нельзя получить config
+        // профиля A с ключом профиля B (секрет уехал бы на чужой endpoint).
+        let tokenProvider = profiles.tokenProvider
+        let customInstructions = profiles.customInstructions
         state = .loading
 
         // Снапшот собирается на MainActor (читает published-библиотеку),
@@ -89,11 +94,11 @@ final class HomeFeedService: ObservableObject {
         // Адаптер под тип API активного профиля (chat completions /
         // OpenAI Responses / Anthropic Messages) — фабрика ZverBrain.
         let client = BrainClientFactory.make(config: config,
-                                             tokenProvider: profiles.tokenProvider)
+                                             tokenProvider: tokenProvider)
         do {
             let (system, user) = HomeFeedPrompt.build(
                 snapshot: snapshot,
-                customInstructions: profiles.customInstructions)
+                customInstructions: customInstructions)
             let text = try await client.complete(system: system, user: user)
             let parsed = try HomeFeedParser.parse(text, validAlbumIds: Set(keysById.keys))
             let resolved = Self.resolve(parsed, keysById: keysById)

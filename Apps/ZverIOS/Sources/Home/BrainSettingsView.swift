@@ -118,6 +118,10 @@ private struct BrainProfileEditor: View {
     @Environment(\.dismiss) private var dismiss
     @State private var keyInput = ""
     @State private var keyError: String?
+    /// Отложенные операции с ключом — Keychain трогаем ТОЛЬКО в save():
+    /// «Отмена» шита не должна оставлять уже удалённый/заменённый ключ.
+    @State private var isReplacingKey = false
+    @State private var pendingKeyDeletion = false
 
     init(store: BrainProfilesStore, profile: BrainProfile) {
         self.store = store
@@ -182,17 +186,28 @@ private struct BrainProfileEditor: View {
 
     private var keySection: some View {
         Section {
-            if store.hasKey(profile.id) {
+            if store.hasKey(profile.id), !isReplacingKey, !pendingKeyDeletion {
                 LabeledContent("Ключ API") {
                     Label(store.maskedKey(for: profile.id) ?? "сохранён",
                           systemImage: "checkmark.seal.fill")
                         .foregroundStyle(.green)
                 }
+                Button("Заменить ключ…") { isReplacingKey = true }
                 Button("Удалить ключ", role: .destructive) {
-                    store.clearKey(for: profile.id)
+                    pendingKeyDeletion = true
                 }
+            } else if pendingKeyDeletion {
+                Label("Ключ будет удалён при сохранении", systemImage: "key.slash")
+                    .foregroundStyle(.orange)
+                Button("Оставить ключ") { pendingKeyDeletion = false }
             } else {
                 SecureField("API-ключ провайдера", text: $keyInput)
+                if isReplacingKey {
+                    Button("Оставить прежний ключ") {
+                        isReplacingKey = false
+                        keyInput = ""
+                    }
+                }
                 if let keyError {
                     Text(keyError).font(.caption).foregroundStyle(.red)
                 }
@@ -200,7 +215,8 @@ private struct BrainProfileEditor: View {
         } header: {
             Text("Ключ")
         } footer: {
-            Text("Хранится в Keychain, у каждого профиля свой.")
+            Text("Хранится в Keychain, у каждого профиля свой. Изменения " +
+                 "ключа применяются кнопкой «Сохранить».")
         }
     }
 
@@ -238,7 +254,12 @@ private struct BrainProfileEditor: View {
     }
 
     private func save() {
-        if !store.hasKey(profile.id) {
+        // Ключ применяется здесь, а не в момент нажатий (см. keySection):
+        // удаление — по отложенному флагу; ввод (новый профиль или замена) —
+        // перезаписью существующей записи Keychain.
+        if pendingKeyDeletion {
+            store.clearKey(for: profile.id)
+        } else {
             let trimmed = keyInput.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmed.isEmpty {
                 do {

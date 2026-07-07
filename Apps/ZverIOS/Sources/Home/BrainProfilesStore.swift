@@ -190,8 +190,12 @@ final class BrainProfilesStore: ObservableObject {
         profiles = [profile]
         activeProfileId = profile.id
         if let legacyKey, !legacyKey.isEmpty {
-            try? keyStore.save(token: legacyKey, forService: Self.service(for: profile.id))
-            try? keyStore.delete(forService: Self.legacyService)
+            // Легаси-запись удаляем ТОЛЬКО после успешного переноса: упавший
+            // save + безусловный delete потеряли бы единственный ключ.
+            if (try? keyStore.save(token: legacyKey,
+                                   forService: Self.service(for: profile.id))) != nil {
+                try? keyStore.delete(forService: Self.legacyService)
+            }
         }
         defaults.removeObject(forKey: Self.legacyBaseURLKey)
         defaults.removeObject(forKey: Self.legacyModelKey)

@@ -85,7 +85,10 @@ final class OpenAIResponsesClient: ChatClient, @unchecked Sendable {
             model: config.model,
             instructions: system,
             input: user,
-            temperature: 0.8,
+            // Reasoning-модели (o-series/gpt-5) отвергают temperature ≠ default
+            // (400 Unsupported parameter) — при включённом рассуждении параметр
+            // опускается целиком, модель работает со своим дефолтом.
+            temperature: config.reasoning == .off ? 0.8 : nil,
             // Нативный веб-поиск — только при включённом тумблере.
             tools: config.webSearch ? [.init(type: "web_search")] : nil,
             // reasoning:{effort} — только когда рассуждение запрошено.
@@ -98,15 +101,16 @@ final class OpenAIResponsesClient: ChatClient, @unchecked Sendable {
 
 // MARK: - JSON-модели протокола responses
 
-/// Тело запроса `responses`. Опциональные `tools`/`reasoning` при `nil`
-/// опускаются (`encodeIfPresent`).
+/// Тело запроса `responses`. Опциональные `temperature`/`tools`/`reasoning`
+/// при `nil` опускаются (синтезированный Encodable для Optional —
+/// `encodeIfPresent`).
 private struct ResponsesRequest: Encodable {
     struct Tool: Encodable { let type: String }
     struct Reasoning: Encodable { let effort: String }
     let model: String
     let instructions: String
     let input: String
-    let temperature: Double
+    let temperature: Double?
     let tools: [Tool]?
     let reasoning: Reasoning?
 }

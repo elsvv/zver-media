@@ -117,6 +117,16 @@ struct BrainNetworkTests {
             #expect(messages[1]["content"] as? String == "USER-MARK")
         }
 
+        @Test func reasoningOmitsTemperature() async throws {
+            // Reasoning-модели OpenAI отвергают temperature ≠ default (400) —
+            // с включённым рассуждением параметр не отправляется вовсе.
+            MockURLProtocol.setStub(.init(statusCode: 200, body: Data(Self.okBody.utf8)))
+            _ = try await makeClient(reasoning: .medium).complete(system: "s", user: "u")
+            let body = try lastBody()
+            #expect(body["temperature"] == nil)
+            #expect(body["reasoning_effort"] as? String == "medium")
+        }
+
         // Инструменты: веб-поиск (плагин OpenRouter)
 
         @Test func noPluginsWhenWebSearchOff() async throws {
@@ -311,6 +321,14 @@ struct BrainNetworkTests {
             _ = try await makeClient(reasoning: .high).complete(system: "s", user: "u")
             let reasoning = try #require(try lastBody()["reasoning"] as? [String: Any])
             #expect(reasoning["effort"] as? String == "high")
+        }
+
+        @Test func reasoningOmitsTemperature() async throws {
+            // Reasoning-модели отвергают temperature ≠ default (400
+            // Unsupported parameter) — с рассуждением параметр опускается.
+            MockURLProtocol.setStub(.init(statusCode: 200, body: Data(Self.okBody.utf8)))
+            _ = try await makeClient(reasoning: .low).complete(system: "s", user: "u")
+            #expect(try lastBody()["temperature"] == nil)
         }
 
         // Ошибки статусов

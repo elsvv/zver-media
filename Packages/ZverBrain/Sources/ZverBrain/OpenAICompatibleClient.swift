@@ -84,7 +84,10 @@ public final class OpenAICompatibleClient: ChatClient, @unchecked Sendable {
                 .init(role: "system", content: system),
                 .init(role: "user", content: user),
             ],
-            temperature: 0.8,
+            // Reasoning-модели OpenAI (o-series/gpt-5) при прямом подключении
+            // отвергают temperature ≠ default (400) — с включённым рассуждением
+            // параметр опускается (OpenRouter в обоих вариантах ок).
+            temperature: config.reasoning == .off ? 0.8 : nil,
             // Плагин веб-поиска OpenRouter — только при включённом тумблере.
             plugins: config.webSearch ? [.init(id: "web")] : nil,
             // reasoning_effort — только когда рассуждение запрошено (off → nil → поле опущено).
@@ -112,7 +115,7 @@ private struct ChatCompletionRequest: Encodable {
     }
     let model: String
     let messages: [Message]
-    let temperature: Double
+    let temperature: Double?
     let plugins: [Plugin]?
     let reasoningEffort: String?
 
