@@ -437,6 +437,13 @@ public enum LibraryScanner {
     /// валить скан целиком).
     private static func audioURLs(in directory: URL) throws -> [URL] {
         let rootPath = directory.standardizedFileURL.path
+        // `Documents/Inbox` — системный «входящий» каталог iOS: сюда попадают файлы,
+        // открытые через «Скопировать в Zver» (Open-in без in-place) и AirDrop. Это
+        // ещё не разложенное сырьё — его разбирает `AlbumImporter` (в `Library/`),
+        // поэтому в скан библиотеки оно попадать не должно (иначе недоимпортированный
+        // файл засветился бы как трек). Пропускаем весь каталог, не спускаясь внутрь.
+        let inboxPath = directory.standardizedFileURL
+            .appendingPathComponent("Inbox").path
         var rootError: Error?
         guard let enumerator = FileManager.default.enumerator(
             at: directory,
@@ -455,6 +462,10 @@ public enum LibraryScanner {
 
         var urls: [URL] = []
         for case let url as URL in enumerator {
+            if url.standardizedFileURL.path == inboxPath {
+                enumerator.skipDescendants()
+                continue
+            }
             guard audioExtensions.contains(url.pathExtension.lowercased()),
                   (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
             else { continue }
