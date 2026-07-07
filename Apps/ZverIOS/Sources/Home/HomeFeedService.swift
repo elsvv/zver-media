@@ -6,7 +6,10 @@ import ZverCore
 /// превращены в переносимые ключи альбомов (относительные пути) — кэш ленты
 /// переживает перегенерацию снапшота, где нумерация другая.
 struct ResolvedHomeSection: Codable, Equatable, Identifiable, Sendable {
-    var id: String { title }
+    /// Стабильный id в рамках одной ленты — ИНДЕКСНЫЙ (`sec3`), не title:
+    /// модель может вернуть две секции с одинаковым названием, а дубликат id
+    /// в ForEach молча роняет вторую секцию.
+    let id: String
     let title: String
     let subtitle: String?
     let tags: [String]?
@@ -18,7 +21,8 @@ struct ResolvedHomeSection: Codable, Equatable, Identifiable, Sendable {
 
 /// Внешняя рекомендация: альбом вне библиотеки + почему он зайдёт.
 struct ExternalSuggestion: Codable, Equatable, Identifiable, Sendable {
-    var id: String { "\(artist) — \(album)" }
+    /// Индексный id (`sec5-ext2`) — пара артист+альбом может повториться.
+    let id: String
     let artist: String
     let album: String
     let year: Int?
@@ -158,7 +162,8 @@ final class HomeFeedService: ObservableObject {
             topAlbums: (stats?.albums.prefix(20) ?? []).compactMap { item in
                 idByKey[item.albumKey].map { .init(id: $0, plays: item.count) }
             },
-            favoriteAlbumIds: favoriteKeySet.compactMap { idByKey[$0] }.sorted(),
+            favoriteAlbumIds: favoriteKeySet.compactMap { idByKey[$0] }
+                .sorted { (Int($0.dropFirst()) ?? 0) < (Int($1.dropFirst()) ?? 0) },
             favoriteTrackTitles: library.favoriteTracks.prefix(30).map(\.title),
             recentlyPlayedIds: recentlyPlayedKeys.compactMap { idByKey[$0] },
             recentlyAddedIds: selected
@@ -176,22 +181,25 @@ final class HomeFeedService: ObservableObject {
     /// `HomeFeed` (короткие id) → резолвнутые секции (переносимые ключи).
     private static func resolve(_ feed: HomeFeed,
                                 keysById: [String: String]) -> [ResolvedHomeSection] {
-        feed.sections.compactMap { section in
+        feed.sections.enumerated().compactMap { index, section in
             switch section.kind {
             case .albums:
                 let keys = (section.albumIds ?? []).compactMap { keysById[$0] }
                 guard !keys.isEmpty else { return nil }
-                return ResolvedHomeSection(title: section.title,
+                return ResolvedHomeSection(id: "sec\(index)",
+                                           title: section.title,
                                            subtitle: section.subtitle,
                                            tags: section.tags,
                                            albumKeys: keys, external: [])
             case .external:
-                let items = (section.items ?? []).map {
-                    ExternalSuggestion(artist: $0.artist, album: $0.album,
-                                       year: $0.year, reason: $0.reason)
+                let items = (section.items ?? []).enumerated().map { itemIndex, item in
+                    ExternalSuggestion(id: "sec\(index)-ext\(itemIndex)",
+                                       artist: item.artist, album: item.album,
+                                       year: item.year, reason: item.reason)
                 }
                 guard !items.isEmpty else { return nil }
-                return ResolvedHomeSection(title: section.title,
+                return ResolvedHomeSection(id: "sec\(index)",
+                                           title: section.title,
                                            subtitle: section.subtitle,
                                            tags: section.tags,
                                            albumKeys: [], external: items)

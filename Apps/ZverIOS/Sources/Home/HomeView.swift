@@ -63,46 +63,83 @@ struct HomeView: View {
 
     // MARK: - AI-лента
 
+    /// Лента живёт поверх статуса: уже собранная (кэш) НЕ пропадает во время
+    /// загрузки или после ошибки — статус показывается инлайн-баннером сверху.
+    /// Полноэкранные состояния — только когда показывать нечего.
     @ViewBuilder
     private var feedBody: some View {
+        if let feed = feedService.feed {
+            statusBanner
+            ForEach(feed.sections) { section in
+                sectionView(section)
+            }
+        } else {
+            switch feedService.state {
+            case .loading:
+                VStack(spacing: 10) {
+                    ProgressView()
+                    Text("Модель собирает ленту…")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 32)
+            case .failed(let message):
+                ContentUnavailableView {
+                    Label("Лента не собралась", systemImage: "sparkles")
+                } description: {
+                    Text(message)
+                } actions: {
+                    Button("Попробовать ещё раз") { confirmsRefresh = true }
+                }
+            case .idle:
+                if account.isConfigured {
+                    ContentUnavailableView {
+                        Label("Лента ещё не собрана", systemImage: "sparkles")
+                    } description: {
+                        Text("Нажми ⋯ → «Обновить рекомендации» — модель соберёт" +
+                             " подборки по твоей библиотеке и истории.")
+                    }
+                } else {
+                    ContentUnavailableView {
+                        Label("Интеллект не настроен", systemImage: "sparkles")
+                    } description: {
+                        Text("Укажи API-ключ, base URL и модель в Настройках →" +
+                             " Интеллект, и здесь появятся умные подборки.")
+                    }
+                }
+            }
+        }
+    }
+
+    /// Инлайн-статус над живой лентой: спиннер во время генерации, ошибка —
+    /// баннером (старая лента остаётся рабочей).
+    @ViewBuilder
+    private var statusBanner: some View {
         switch feedService.state {
         case .loading:
-            VStack(spacing: 10) {
+            HStack(spacing: 10) {
                 ProgressView()
-                Text("Модель собирает ленту…")
+                Text("Модель собирает новую ленту…")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 32)
+            .padding(.horizontal, 16)
         case .failed(let message):
-            ContentUnavailableView {
-                Label("Лента не собралась", systemImage: "sparkles")
-            } description: {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
                 Text(message)
-            } actions: {
-                Button("Попробовать ещё раз") { confirmsRefresh = true }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color(uiColor: .secondarySystemBackground),
+                        in: RoundedRectangle(cornerRadius: 10))
+            .padding(.horizontal, 16)
         case .idle:
-            if let feed = feedService.feed {
-                ForEach(feed.sections) { section in
-                    sectionView(section)
-                }
-            } else if account.isConfigured {
-                ContentUnavailableView {
-                    Label("Лента ещё не собрана", systemImage: "sparkles")
-                } description: {
-                    Text("Нажми ⋯ → «Обновить рекомендации» — модель соберёт" +
-                         " подборки по твоей библиотеке и истории.")
-                }
-            } else {
-                ContentUnavailableView {
-                    Label("Интеллект не настроен", systemImage: "sparkles")
-                } description: {
-                    Text("Укажи API-ключ, base URL и модель в Настройках →" +
-                         " Интеллект, и здесь появятся умные подборки.")
-                }
-            }
+            EmptyView()
         }
     }
 

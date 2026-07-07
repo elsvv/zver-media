@@ -14,7 +14,9 @@ import ZverMetadata
 /// с чтением/записью вне главного потока и republish после изменения.
 @MainActor
 final class LibraryStore: ObservableObject {
-    @Published private(set) var albums: [AlbumGroup] = []
+    @Published private(set) var albums: [AlbumGroup] = [] {
+        didSet { albumKeyIndex = nil }
+    }
     @Published private(set) var playlists: [Playlist] = []
     /// Избранное: ключи в каталожном формате (относительные от Documents —
     /// стабильны между реинсталлами, в отличие от абсолютных путей `Track.id`/
@@ -437,9 +439,22 @@ final class LibraryStore: ObservableObject {
         Self.albumKey(for: group, documentsURL: documentsURL)
     }
 
-    /// Альбом по переносимому ключу (линейный поиск — библиотека сотни групп).
+    /// Ленивый индекс ключ → альбом. Сбрасывается при каждом publish albums
+    /// (didSet); строится по требованию. Нужен ленте «Главной»: резолв ключей
+    /// в рендер-пути, линейный поиск с нормализацией путей на каждый вызов —
+    /// десятки тысяч лишних вычислений на один проход body.
+    private var albumKeyIndex: [String: AlbumGroup]?
+
+    /// Альбом по переносимому ключу (через ленивый индекс).
     func album(forKey key: String) -> AlbumGroup? {
-        albums.first { albumKey(of: $0) == key }
+        if albumKeyIndex == nil {
+            albumKeyIndex = Dictionary(
+                albums.compactMap { group in albumKey(of: group).map { ($0, group) } },
+                // Ключ (путь папки) уникален на группу по построению; дубликат
+                // означал бы сломанный инвариант — не падаем, берём первую.
+                uniquingKeysWith: { first, _ in first })
+        }
+        return albumKeyIndex?[key]
     }
 
     /// Последние прослушанные альбомы (различные, по свежести последнего
@@ -450,9 +465,7 @@ final class LibraryStore: ObservableObject {
             (try? historyStore.recentAlbumKeys(limit: limit)) ?? []
         }.value
         // Порядок ключей истории сохраняем (свежие первыми).
-        let byKey = Dictionary(uniqueKeysWithValues:
-            albums.compactMap { group in albumKey(of: group).map { ($0, group) } })
-        return keys.compactMap { byKey[$0] }
+        return keys.compactMap { album(forKey: $0) }
     }
 
     /// Агрегат прослушивания за период (сырьё промпта AI-ленты).
