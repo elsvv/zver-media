@@ -157,6 +157,41 @@ public final class Catalog: Sendable {
             try db.rename(table: "playlistTrack_new", to: "playlistTrack")
         }
 
+        // v6: избранное и история прослушивания. Аддитивна — только две новые
+        // таблицы, `track` не трогаем. Обе СОЗНАТЕЛЬНО без FK на `track`:
+        // избранное и история переживают офлоад/удаление файла (рескан их не
+        // чистит, как и плейлисты живут в бэкапе `catalog.sqlite.backup`).
+        migrator.registerMigration("v6") { db in
+            // Избранное трека (`entityKey == trackKey`) или альбома
+            // (`entityKey == AlbumGroup.id`, путь папки). Композитный PK делает
+            // повторное добавление идемпотентным (INSERT OR IGNORE).
+            try db.create(table: "favorite") { t in
+                t.column("entityKind", .text).notNull()   // 'track' | 'album'
+                t.column("entityKey", .text).notNull()
+                t.column("createdAt", .datetime).notNull()
+                t.primaryKey(["entityKind", "entityKey"])
+            }
+
+            // Событие воспроизведения. Денормализовано снапшотом title/artist/
+            // album/albumKey — история осмысленна даже после удаления трека/файла
+            // (потому и нет FK на `track`). `endReason` — почему трек закончился.
+            try db.create(table: "playEvent") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("trackKey", .text).notNull()
+                t.column("title", .text).notNull()
+                t.column("artist", .text)
+                t.column("album", .text)
+                t.column("albumKey", .text)
+                t.column("startedAt", .datetime).notNull()
+                t.column("playedSeconds", .double).notNull()
+                t.column("trackDuration", .double).notNull()
+                t.column("endReason", .text).notNull()   // 'finished'|'skipped'|'stopped'
+            }
+            // Выборки «недавнего» идут по времени — индекс на startedAt.
+            try db.create(index: "playEvent_startedAt", on: "playEvent",
+                          columns: ["startedAt"])
+        }
+
         return migrator
     }
 }

@@ -23,6 +23,10 @@ public struct Track: Identifiable, Equatable, Hashable, Sendable {
     public var bitDepth: Int?
     public var fileExtension: String
     public var artworkFileURL: URL?   // обложка из файла в папке (folder.jpg и т.п.)
+    /// Когда трек добавлен в каталог (из строки `track.addedAt`). nil, если трек
+    /// собран не из каталога (напр. свежесканированный до сверки). Питает секцию
+    /// «Недавно добавленные» (recency альбома = max addedAt его треков).
+    public var addedAt: Date?
     public var fileState: FileState   // ярус хранения локально/в облаке (этап 4)
     /// Номер cue-трека (1-based) внутри контейнерного `.flac` (image+cue). nil —
     /// обычный трек (1 файл = 1 трек). Входит в `id` для различения соседей.
@@ -39,7 +43,8 @@ public struct Track: Identifiable, Equatable, Hashable, Sendable {
     public init(url: URL, title: String, artist: String? = nil, album: String? = nil,
                 trackNumber: Int? = nil, discNumber: Int? = nil, discLabel: String? = nil,
                 year: Int? = nil, duration: Double, sampleRate: Double, bitDepth: Int? = nil,
-                artworkFileURL: URL? = nil, fileState: FileState = .local,
+                artworkFileURL: URL? = nil, addedAt: Date? = nil,
+                fileState: FileState = .local,
                 cueIndex: Int? = nil, startFrame: Int64? = nil, frameCount: Int64? = nil) {
         if let cueIndex {
             self.id = "\(url.path)#\(cueIndex)"
@@ -59,6 +64,7 @@ public struct Track: Identifiable, Equatable, Hashable, Sendable {
         self.bitDepth = bitDepth
         self.fileExtension = url.pathExtension.lowercased()
         self.artworkFileURL = artworkFileURL
+        self.addedAt = addedAt
         self.fileState = fileState
         self.cueIndex = cueIndex
         self.startFrame = startFrame

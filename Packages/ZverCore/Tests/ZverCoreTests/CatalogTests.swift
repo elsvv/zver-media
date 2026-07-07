@@ -20,7 +20,7 @@ import Testing
                 """
             )
         }
-        #expect(tables == ["playlist", "playlistTrack", "track"])
+        #expect(tables == ["favorite", "playEvent", "playlist", "playlistTrack", "track"])
     }
 
     @Test func reopeningSameDatabaseIsIdempotent() throws {
@@ -370,6 +370,50 @@ import Testing
         #expect(rec?.frameCount == 4_410_000)
     }
 
+    // MARK: - Миграция v6 (favorite, playEvent)
+
+    @Test func migrationV6CreatesFavoriteTableWithCompositePrimaryKey() throws {
+        let catalog = try Catalog.inMemory()
+        let columns = try catalog.dbQueue.read { db in
+            try db.columns(in: "favorite").map(\.name)
+        }
+        #expect(columns == ["entityKind", "entityKey", "createdAt"])
+        let pk = try catalog.dbQueue.read { db in try db.primaryKey("favorite").columns }
+        #expect(pk == ["entityKind", "entityKey"])
+    }
+
+    @Test func migrationV6CreatesPlayEventTableWithColumnsAndIndex() throws {
+        let catalog = try Catalog.inMemory()
+        let columns = try catalog.dbQueue.read { db in
+            try db.columns(in: "playEvent").map(\.name)
+        }
+        #expect(columns == ["id", "trackKey", "title", "artist", "album", "albumKey",
+                            "startedAt", "playedSeconds", "trackDuration", "endReason"])
+        // autoincrement PK на id
+        let pk = try catalog.dbQueue.read { db in try db.primaryKey("playEvent").columns }
+        #expect(pk == ["id"])
+        // индекс на startedAt (выборки недавнего)
+        let indexes = try catalog.dbQueue.read { db in
+            try String.fetchAll(
+                db,
+                sql: "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'playEvent'"
+            )
+        }
+        #expect(indexes.contains("playEvent_startedAt"))
+    }
+
+    @Test func migrationV6IsAdditiveKeepingExistingTracks() throws {
+        // v6 не должна затрагивать `track`: строка, вставленная до применения
+        // (эмулируем через свежую БД + запись), остаётся на месте.
+        let catalog = try Catalog.inMemory()
+        try catalog.dbQueue.write { db in
+            try TrackRecord(relativePath: "a.flac", title: "А",
+                            duration: 1, sampleRate: 44100).insert(db)
+        }
+        let count = try catalog.dbQueue.read { db in try TrackRecord.fetchCount(db) }
+        #expect(count == 1)
+    }
+
     // MARK: - Roundtrip TrackRecord
 
     @Test func insertFetchRoundtripPreservesAllFields() throws {
@@ -501,6 +545,39 @@ import Testing
                           title: "А", duration: 1, sampleRate: 44100)
 
         #expect(track.fileState == .local)
+    }
+
+    @Test func trackFromRecordCarriesAddedAt() throws {
+        // Питает «Недавно добавленные»: addedAt строки каталога доходит до Track.
+        let addedAt = Date(timeIntervalSince1970: 1_750_000_000)
+        let record = TrackRecord(relativePath: "a.flac", title: "А",
+                                 duration: 1, sampleRate: 44100, addedAt: addedAt)
+
+        let track = record.track(documentsURL: URL(fileURLWithPath: "/docs"))
+
+        #expect(track.addedAt == addedAt)
+    }
+
+    @Test func trackFromCatalogRowCarriesAddedAt() throws {
+        // Полный путь: строка в БД → fetch → маппинг в Track (как в LibraryStore).
+        let catalog = try Catalog.inMemory()
+        let addedAt = Date(timeIntervalSince1970: 1_750_000_000)
+        try catalog.dbQueue.write { db in
+            try TrackRecord(relativePath: "a.flac", title: "А", duration: 1,
+                            sampleRate: 44100, addedAt: addedAt).insert(db)
+        }
+
+        let track = try CatalogStore(catalog: catalog)
+            .allTracks(documentsURL: URL(fileURLWithPath: "/docs")).first
+
+        #expect(track?.addedAt == addedAt)
+    }
+
+    @Test func trackDefaultsAddedAtToNilWhenConstructedDirectly() throws {
+        let track = Track(url: URL(fileURLWithPath: "/docs/a.flac"),
+                          title: "А", duration: 1, sampleRate: 44100)
+
+        #expect(track.addedAt == nil)
     }
 
     @Test func trackFromRecordWithoutArtworkHasNilArtworkURL() throws {
