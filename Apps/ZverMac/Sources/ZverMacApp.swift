@@ -5,9 +5,9 @@ import ZverTransport
 
 /// Mac-компаньон Zver Media.
 ///
-/// Живёт в меню-баре (`LSUIElement`); главное окно — импорт альбомов:
-/// drag-drop папки → превью/редактор → исходящая очередь. Сетевая раздача
-/// (сервер + Bonjour + pairing) — S3-9, здесь только каркас.
+/// Полноценное приложение (Dock + alt-tab): одно окно с сайдбаром
+/// Синк / Библиотека / Пульт (`RootView`/`NavigationSplitView`). Меню-бар-экстра
+/// остаётся как быстрый статус очереди/раздачи и точка «Открыть Zver Media».
 @main
 struct ZverMacApp: App {
     @NSApplicationDelegateAdaptor(ZverAppDelegate.self) private var appDelegate
@@ -17,8 +17,8 @@ struct ZverMacApp: App {
     /// той же очереди, что и UI: стартует сервер при непустой очереди.
     @StateObject private var server: ServerCoordinator
     /// Координатор пульта (этап 5): browse `_zver._tcp svc=remote` → WS-клиент к
-    /// iPhone → приём состояния/библиотеки, отправка команд. Живёт всё время
-    /// работы приложения; browse реально стартует при открытии окна «Пульт».
+    /// iPhone → приём состояния/библиотеки/обложек, отправка команд. Живёт всё
+    /// время работы приложения; browse стартует на появлении окна (`RootView`).
     @StateObject private var remote = RemoteClientCoordinator()
 
     init() {
@@ -44,15 +44,10 @@ struct ZverMacApp: App {
     }
 
     var body: some Scene {
-        Window("Zver Media — Синк", id: "main") {
-            ImportWindow(queue: queue, dropController: dropController, server: server)
+        Window("Zver Media", id: "main") {
+            RootView(queue: queue, dropController: dropController, server: server, remote: remote)
         }
-        .defaultSize(width: 760, height: 560)
-
-        Window("Пульт", id: "remote") {
-            RemoteControlView(coordinator: remote)
-        }
-        .defaultSize(width: 440, height: 600)
+        .defaultSize(width: 940, height: 640)
 
         MenuBarExtra("Zver Media", systemImage: "music.note.house") {
             MenuBarContent(queue: queue, server: server)
@@ -60,173 +55,12 @@ struct ZverMacApp: App {
     }
 }
 
-/// Главное окно импорта: слева очередь, справа дроп-зона/превью.
-private struct ImportWindow: View {
-    @ObservedObject var queue: OutgoingQueue
-    @ObservedObject var dropController: DropController
-    @ObservedObject var server: ServerCoordinator
-
-    /// Подсветка дроп-зоны при наведении папки.
-    @State private var isTargeted = false
-
-    var body: some View {
-        HSplitView {
-            QueueView(queue: queue, server: server)
-                .frame(minWidth: 240, idealWidth: 280)
-
-            ZStack {
-                if let draft = dropController.draft {
-                    AlbumPreviewView(
-                        draft: draft,
-                        onEnqueue: { await enqueue(draft: draft) },
-                        onCancel: { dropController.clear() }
-                    )
-                } else {
-                    DropZone(
-                        isTargeted: isTargeted,
-                        isScanning: dropController.isScanning,
-                        error: dropController.lastError
-                    )
-                }
-            }
-            .frame(minWidth: 420)
-        }
-        .onDrop(of: [.fileURL], isTargeted: $isTargeted) { providers in
-            handleDrop(providers)
-            return true
-        }
-    }
-
-    /// Drag-drop папки → скан → черновик. Парсинг провайдеров и скан — async,
-    /// публикация черновика — на `@MainActor` внутри `DropController`.
-    private func handleDrop(_ providers: [NSItemProvider]) {
-        Task {
-            guard let folder = await DropController.firstFolderURL(from: providers)
-            else { return }
-            await dropController.importFolder(folder)
-        }
-    }
-
-    /// «В очередь»: снимает данные с `@MainActor`-модели, собирает манифест с
-    /// хешированием файлов ВНЕ главного потока, затем публикует в очередь на
-    /// `@MainActor`. После успеха очищает черновик и возвращает nil; на ошибке
-    /// возвращает текст (RU) — `AlbumPreviewView` сбросит индикацию и покажет его,
-    /// черновик остаётся для повторной попытки.
-    private func enqueue(draft: AlbumDraft) async -> String? {
-        let snapshot = draft.snapshot()
-        let keyFolder = draft.sourceFolder   // оригинал для учёта доставки
-
-        // DSD-альбом: сконвертировать `.dsf` → FLAC в staging ДО сборки манифеста.
-        // Прогресс капаем в черновик (футер превью), исходную папку не трогаем.
-        let prepared: ManifestBuilder.DraftSnapshot
-        if DSDStaging.containsDSD(snapshot) {
-            guard let ffmpeg = FFmpegLocator.find() else {
-                return "Не найден ffmpeg (нужен для DSD). Установите: brew install ffmpeg"
-            }
-            let quality = draft.dsdQuality
-            let total = snapshot.tracks.filter { $0.fileExtension == "dsf" }.count
-            let generation = draft.beginConversion(total: total)
-            do {
-                prepared = try await Task.detached(priority: .userInitiated) {
-                    try DSDStaging.materialize(snapshot, quality: quality, ffmpeg: ffmpeg) { done, total in
-                        Task { @MainActor in
-                            draft.reportConversion(done: done, total: total, generation: generation)
-                        }
-                    }
-                }.value
-            } catch {
-                draft.endConversion()
-                return (error as? LocalizedError)?.errorDescription
-                    ?? "Не удалось сконвертировать DSD в FLAC."
-            }
-            draft.endConversion()
-        } else {
-            prepared = snapshot
-        }
-
-        let album = await Task.detached(priority: .userInitiated) {
-            () -> QueuedAlbum.BuildResult in
-            do {
-                let manifestAlbum = try ManifestBuilder.buildAlbum(from: prepared)
-                return .success(manifestAlbum)
-            } catch {
-                return .failure("Не удалось подготовить альбом к отправке.")
-            }
-        }.value
-
-        switch album {
-        case .success(let manifestAlbum):
-            queue.enqueue(QueuedAlbum(
-                manifestAlbum: manifestAlbum,
-                sourceFolder: prepared.sourceFolder,
-                deliveredKeyFolder: keyFolder
-            ))
-            dropController.clear()
-            return nil
-        case .failure(let message):
-            // Черновик оставляем, чтобы пользователь мог повторить отправку.
-            return message
-        }
-    }
-}
-
-extension QueuedAlbum {
-    /// Результат фоновой сборки манифеста (Sendable для перехода с detached-таски).
-    enum BuildResult: Sendable {
-        case success(ManifestAlbum)
-        case failure(String)
-    }
-}
-
-/// Пустая дроп-зона / индикатор скана / ошибка.
-private struct DropZone: View {
-    let isTargeted: Bool
-    let isScanning: Bool
-    let error: String?
-
-    var body: some View {
-        VStack(spacing: 14) {
-            if isScanning {
-                ProgressView()
-                Text("Читаю папку альбома…")
-                    .foregroundStyle(.secondary)
-            } else {
-                Image(systemName: "square.and.arrow.down.on.square")
-                    .font(.system(size: 52))
-                    .foregroundStyle(isTargeted ? Color.accentColor : .secondary)
-                Text("Перетащите сюда папку альбома")
-                    .font(.title3)
-                Text("Метаданные можно отредактировать перед отправкой — исходные файлы не меняются.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                if let error {
-                    Text(error)
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                        .multilineTextAlignment(.center)
-                }
-            }
-        }
-        .padding(40)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(
-            RoundedRectangle(cornerRadius: 12)
-                .strokeBorder(
-                    isTargeted ? Color.accentColor : Color.secondary.opacity(0.3),
-                    style: StrokeStyle(lineWidth: 2, dash: [8])
-                )
-                .padding(20)
-        )
-    }
-}
-
-/// Содержимое меню-бара: краткий статус очереди.
+/// Содержимое меню-бара: краткий статус очереди/раздачи + «Открыть Zver Media».
 private struct MenuBarContent: View {
     @ObservedObject var queue: OutgoingQueue
     @ObservedObject var server: ServerCoordinator
     /// Открывает/фокусирует главное окно даже если оно было закрыто
-    /// (LSUIElement-агент: `NSApp.activate` закрытую SwiftUI-сцену не воскрешает).
+    /// (`NSApp.activate` закрытую SwiftUI-сцену не воскрешает).
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
@@ -249,11 +83,7 @@ private struct MenuBarContent: View {
             Text(message)
         }
         Divider()
-        Button("Открыть пульт") {
-            openWindow(id: "remote")
-            NSApp.activate(ignoringOtherApps: true)
-        }
-        Button("Открыть окно синка") {
+        Button("Открыть Zver Media") {
             openWindow(id: "main")
             NSApp.activate(ignoringOtherApps: true)
         }
@@ -360,7 +190,7 @@ enum MacEnqueue {
 }
 
 /// App-делегат: запускает автосинк после `applicationDidFinishLaunching` —
-/// надёжнее, чем `.task` окна у menu-bar-агента, чьё окно может быть закрыто.
+/// надёжнее, чем `.task` окна, чьё окно может быть закрыто.
 final class ZverAppDelegate: NSObject, NSApplicationDelegate {
     nonisolated(unsafe) static var onLaunch: (() -> Void)?
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -368,8 +198,9 @@ final class ZverAppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-private extension AlbumDraft {
-    /// Снимок данных модели для безопасной передачи на фоновую очередь.
+extension AlbumDraft {
+    /// Снимок данных модели для безопасной передачи на фоновую очередь. Internal —
+    /// используется и ручным enqueue (`SyncTabView`), и автоочередью (`MacEnqueue`).
     func snapshot() -> ManifestBuilder.DraftSnapshot {
         ManifestBuilder.DraftSnapshot(
             albumId: albumId,

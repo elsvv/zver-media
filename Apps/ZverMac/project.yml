@@ -32,7 +32,6 @@ targets:
         CFBundleDisplayName: Zver Media
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
-        LSUIElement: true
         LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
         NSHumanReadableCopyright: ""
         NSLocalNetworkUsageDescription: "Zver Media передаёт альбомы на ваш iPhone по локальной сети: ищет устройства поблизости и раздаёт музыку напрямую, без интернета и облака."
