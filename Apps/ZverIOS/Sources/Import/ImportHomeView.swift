@@ -5,14 +5,14 @@ import ZverImport
 /// Корень вкладки «Импорт»: селектор источников. Живёт в существующем
 /// `NavigationStack` вкладки (см. `ContentView`). Пункты:
 /// - «С Мака» — существующий `MacImportView` (Wi-Fi-очередь с Мака);
-/// - «Bandcamp» / «Internet Archive» — заглушки до задач 5-6;
+/// - «Bandcamp» — webview с перехватом скачиваний (`WebDownloadCenter`);
+/// - «Internet Archive» — поиск концертов и загрузка FLAC (`ArchiveDownloadCenter`);
 /// - «Из файлов» — системный `fileImporter` (zip/аудио) → staging → `AlbumImporter`.
 ///
 /// `rescan` (рескан библиотеки + автобэкап) инъектируется из `ContentView` и
-/// раздаётся источникам: сейчас его получают «С Мака» и «Из файлов» (те, что уже
-/// умеют импортировать), Bandcamp/IA подключат его при реализации в задачах 5-6.
-/// `showBanner` показывает плашку-итог поверх табов — её владелец `ContentView`,
-/// тот же баннер, что у системного «Открыть в Zver Media».
+/// раздаётся всем импортирующим источникам («С Мака», Bandcamp, Internet Archive,
+/// «Из файлов»). `showBanner` показывает плашку-итог поверх табов — её владелец
+/// `ContentView`, тот же баннер, что у системного «Открыть в Zver Media».
 struct ImportHomeView: View {
     let rescan: @MainActor () async -> Void
     let showBanner: @MainActor (String) -> Void
@@ -21,6 +21,10 @@ struct ImportHomeView: View {
     /// вкладки webview, — плашка прогресса видна отсюда, из селектора, и переживает
     /// уход с экрана Bandcamp назад в список.
     @StateObject private var downloadCenter: WebDownloadCenter
+    /// Владелец загрузок Internet Archive (последовательная очередь FLAC с Range-докачкой)
+    /// — тоже на уровне стека, поэтому прогресс виден из селектора и переживает уход с
+    /// экрана релиза назад.
+    @StateObject private var archiveCenter: ArchiveDownloadCenter
 
     @State private var isPickingFiles = false
     @State private var isImporting = false
@@ -31,6 +35,8 @@ struct ImportHomeView: View {
         self.showBanner = showBanner
         _downloadCenter = StateObject(
             wrappedValue: WebDownloadCenter(rescan: rescan, showBanner: showBanner))
+        _archiveCenter = StateObject(
+            wrappedValue: ArchiveDownloadCenter(rescan: rescan, showBanner: showBanner))
     }
 
     var body: some View {
@@ -49,7 +55,7 @@ struct ImportHomeView: View {
                               subtitle: "Купленные и бесплатные релизы во FLAC")
                 }
                 NavigationLink {
-                    ArchiveImportView()
+                    ArchiveImportView(center: archiveCenter)
                 } label: {
                     sourceRow("Internet Archive", systemImage: "waveform",
                               subtitle: "Концерты Live Music Archive во FLAC")
@@ -77,10 +83,13 @@ struct ImportHomeView: View {
             handlePick(result)
         }
         .overlay { importingOverlay }
-        // Плашка прогресса скачиваний Bandcamp видна прямо из селектора источников
-        // (центр живёт на уровне стека, а не вкладки webview).
+        // Плашки прогресса скачиваний (Bandcamp и Internet Archive) видны прямо из
+        // селектора источников — центры живут на уровне стека, а не вкладок.
         .safeAreaInset(edge: .bottom) {
-            WebDownloadsPlate(center: downloadCenter)
+            VStack(spacing: 0) {
+                WebDownloadsPlate(center: downloadCenter)
+                ArchiveDownloadsPlate(center: archiveCenter)
+            }
         }
     }
 
