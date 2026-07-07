@@ -16,6 +16,7 @@ final class MockURLProtocol: URLProtocol {
 
     private static let lock = NSLock()
     nonisolated(unsafe) private static var _stub = Stub()
+    nonisolated(unsafe) private static var _routes: [(urlContains: String, stub: Stub)] = []
     nonisolated(unsafe) private static var _lastRequestBody: Data?
     nonisolated(unsafe) private static var _lastRequestURL: URL?
     nonisolated(unsafe) private static var _lastRequestHeaders: [String: String]?
@@ -24,6 +25,19 @@ final class MockURLProtocol: URLProtocol {
     static func setStub(_ stub: Stub) {
         lock.lock(); defer { lock.unlock() }
         _stub = stub
+        _routes = []
+        _lastRequestBody = nil
+        _lastRequestURL = nil
+        _lastRequestHeaders = nil
+    }
+
+    /// Стабы для клиентов, делающих НЕСКОЛЬКО запросов за один вызов
+    /// (Deezer: search → related): первый матч по подстроке absoluteString
+    /// побеждает; запрос без матча получает общий стаб (`Stub()` — пустые 200).
+    static func setRoutes(_ routes: [(urlContains: String, stub: Stub)]) {
+        lock.lock(); defer { lock.unlock() }
+        _stub = Stub()
+        _routes = routes
         _lastRequestBody = nil
         _lastRequestURL = nil
         _lastRequestHeaders = nil
@@ -47,8 +61,12 @@ final class MockURLProtocol: URLProtocol {
         return _lastRequestHeaders
     }
 
-    private static func currentStub() -> Stub {
+    private static func currentStub(for url: URL?) -> Stub {
         lock.lock(); defer { lock.unlock() }
+        if let url,
+           let match = _routes.first(where: { url.absoluteString.contains($0.urlContains) }) {
+            return match.stub
+        }
         return _stub
     }
 
@@ -70,7 +88,7 @@ final class MockURLProtocol: URLProtocol {
             url: request.url,
             headers: request.allHTTPHeaderFields
         )
-        let stub = MockURLProtocol.currentStub()
+        let stub = MockURLProtocol.currentStub(for: request.url)
 
         if let error = stub.error {
             client?.urlProtocol(self, didFailWithError: error)

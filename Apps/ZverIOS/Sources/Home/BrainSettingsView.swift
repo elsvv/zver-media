@@ -9,11 +9,14 @@ struct BrainSettingsView: View {
 
     @AppStorage(BrainProfilesStore.customInstructionsKey)
     private var customInstructions = ""
+    @AppStorage(HomeFeedService.deezerHintsKey)
+    private var deezerHints = true
     @State private var editingProfile: BrainProfile?
 
     var body: some View {
         profilesSection
         instructionsSection
+        deezerSection
     }
 
     // MARK: - Профили
@@ -104,6 +107,19 @@ struct BrainSettingsView: View {
         } footer: {
             Text("Добавляются к каждому запросу ленты. Например: «больше " +
                  "джаза 70-х», «не предлагай сборники», «пиши subtitle с юмором».")
+        }
+    }
+
+    // MARK: - Deezer-скелет
+
+    private var deezerSection: some View {
+        Section {
+            Toggle("Похожие артисты (Deezer)", isOn: $deezerHints)
+        } footer: {
+            Text("Перед обновлением ленты в подсказки модели добавляются " +
+                 "родственные артисты по данным слушателей Deezer. Секции, " +
+                 "собранные с их участием, получают пометку в подзаголовке. " +
+                 "Если Deezer недоступен, лента строится без подсказок.")
         }
     }
 }

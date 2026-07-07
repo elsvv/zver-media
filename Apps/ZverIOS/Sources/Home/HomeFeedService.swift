@@ -128,6 +128,11 @@ final class HomeFeedService: ObservableObject {
     private static let shownWindowDays: TimeInterval = 90
     private static let feedbackLimit = 20
 
+    /// Тумблер Deezer-скелета (Настройки → ИИ), по умолчанию ВКЛ:
+    /// в снапшот добавляются родственные артисты для топ-артистов слушателя.
+    static let deezerHintsKey = "brain.deezerHints"
+    private static let deezerArtistLimit = 5
+
     /// Обрезка external-секции: максимум 4 прошедших валидацию кандидата.
     private static let maxPerSection = 4
 
@@ -172,7 +177,8 @@ final class HomeFeedService: ObservableObject {
                 customInstructions: customInstructions)
             let text = try await client.complete(system: system, user: user)
             let parsed = try HomeFeedParser.parse(text, validAlbumIds: Set(keysById.keys))
-            let resolved = await validateAndResolve(parsed, keysById: keysById)
+            let resolved = await validateAndResolve(parsed, keysById: keysById,
+                                                    deezerHints: snapshot.similarArtistsHints)
             guard !resolved.isEmpty else {
                 state = .failed("Модель вернула пустую ленту — попробуй ещё раз.")
                 return
@@ -254,6 +260,19 @@ final class HomeFeedService: ObservableObject {
             hiddenLimit: Self.feedbackLimit,
             shownWindow: Date().addingTimeInterval(-Self.shownWindowDays * 24 * 3600))
 
+        // Deezer-скелет (тумблер в Настройках → ИИ, по умолчанию вкл):
+        // родственные артисты для топ-5 слушателя. Таймаут 8с на запрос,
+        // любые ошибки — молча пустой словарь: лента строится и без скелета.
+        var deezerHints: [String: [String]] = [:]
+        if UserDefaults.standard.object(forKey: Self.deezerHintsKey) as? Bool ?? true {
+            let topNames = (stats?.artists.prefix(Self.deezerArtistLimit) ?? [])
+                .map(\.artist)
+            if !topNames.isEmpty {
+                deezerHints = await DeezerRelatedFetcher.similarArtistsHints(
+                    for: Array(topNames))
+            }
+        }
+
         let snapshot = LibrarySnapshot(
             albums: entries,
             topArtists: (stats?.artists.prefix(20) ?? []).map {
@@ -278,7 +297,8 @@ final class HomeFeedService: ObservableObject {
             skippedArtists: Array(skipped.prefix(Self.skippedArtistsLimit)),
             recFeedback: feedback.map {
                 .init(liked: $0.liked, hidden: $0.hidden, recentlyShown: $0.recentlyShown)
-            } ?? .empty
+            } ?? .empty,
+            similarArtistsHints: deezerHints
         )
         return (snapshot, keysById)
     }
@@ -290,8 +310,11 @@ final class HomeFeedService: ObservableObject {
     /// 2) дедуп по normKey: библиотека, показанное за 90 дней (кроме liked),
     ///    сама лента; канонические имена iTunes — «второй ключ» (ловит Deluxe);
     /// 3) обрезка до `maxPerSection`; прошедшие — `recordShown` в память.
+    /// Секции, чьи выжившие артисты пришли из Deezer-скелета (`deezerHints`),
+    /// получают кредит «по данным Deezer» в subtitle.
     private func validateAndResolve(_ parsed: HomeFeed,
-                                    keysById: [String: String]) async -> [ResolvedHomeSection] {
+                                    keysById: [String: String],
+                                    deezerHints: [String: [String]] = [:]) async -> [ResolvedHomeSection] {
         // Дедуп-набор: нормализованные ключи библиотеки + показанного за окно
         // (liked не в счёт — понравившееся дозволено вернуть) + самой ленты.
         var seenKeys = Set(library.albums.compactMap { group -> String? in
@@ -365,7 +388,10 @@ final class HomeFeedService: ObservableObject {
                 guard !kept.isEmpty else { continue }
                 sections.append(ResolvedHomeSection(id: "sec\(index)",
                                                     title: section.title,
-                                                    subtitle: section.subtitle,
+                                                    subtitle: DeezerRelatedFetcher.credited(
+                                                        subtitle: section.subtitle,
+                                                        artists: kept.map(\.artist),
+                                                        hints: deezerHints),
                                                     tags: section.tags,
                                                     albumKeys: [], external: kept))
             }
