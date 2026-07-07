@@ -1,18 +1,18 @@
 import SwiftUI
 import ZverTransport
 
-/// Окно «Пульт» (S5-8): транспорт + очередь + браузинг библиотеки iPhone с Мака.
+/// Вкладка «Пульт» (S5-8, редизайн): «что играет сейчас» в духе Музыки —
+/// обложка текущего альбома, транспорт, шкала позиции и очередь.
 ///
 /// Биндится к `RemoteClientCoordinator` (browse/WS/авторизация) и его агрегатору
-/// `RemoteClientStore` (принятое `RemotePlayerState`/`RemoteLibrary`). Кнопки
-/// транспорта и слайдер шлют команды (`play`/`pause`/`next`/`previous`/`seek`);
-/// состояние (трек/playback/очередь) приходит пушами от iPhone. Позицию между
-/// пушами интерполируем локальным таймером, пока `playback == .playing`
-/// (`store.displayPosition`), чтобы шкала ехала плавно без флуда пушей.
+/// `RemoteClientStore` (принятое `RemotePlayerState`). Кнопки транспорта и слайдер
+/// шлют команды (`play`/`pause`/`next`/`previous`/`seek`); состояние приходит
+/// пушами от iPhone. Позицию между пушами интерполируем локальным таймером, пока
+/// `playback == .playing` (`store.displayPosition`), чтобы шкала ехала плавно.
 ///
-/// Деградация: если iPhone не в сети / соединение упало (`status == .offline`),
-/// показываем заглушку с кнопкой переподключения. Пока токена нет — экран ввода
-/// 6-значного кода сопряжения (`needsPairingCode`).
+/// Библиотека («что запустить») переехала в свою вкладку — здесь только играющее
+/// сейчас и очередь. Деградация: не в сети / упало (`status == .offline`) →
+/// заглушка с переподключением; нет токена → ввод 6-значного кода сопряжения.
 struct RemoteControlView: View {
     @ObservedObject var coordinator: RemoteClientCoordinator
     @ObservedObject var store: RemoteClientStore
@@ -28,7 +28,7 @@ struct RemoteControlView: View {
             Divider()
             content
         }
-        .frame(minWidth: 420, minHeight: 520)
+        .navigationTitle("Пульт")
         .onAppear { coordinator.startDiscovery() }
     }
 
@@ -91,34 +91,67 @@ struct RemoteControlView: View {
         }
     }
 
-    /// Основной экран пульта: транспорт сверху, библиотека/очередь снизу.
+    /// Основной экран пульта: now-playing сверху, очередь снизу.
     private var connectedBody: some View {
         VStack(spacing: 0) {
-            NowPlayingPanel(coordinator: coordinator, store: store)
-                .padding(16)
+            NowPlayingPanel(coordinator: coordinator)
+                .padding(20)
             Divider()
-            RemoteLibraryView(coordinator: coordinator, store: store)
+            QueueSection(store: store)
         }
     }
 }
 
 // MARK: - Now Playing + транспорт
 
-/// Текущий трек, шкала позиции и кнопки транспорта. Позиция интерполируется
-/// локальным таймером (`TimelineView`) по `store.displayPosition`, пока играет.
+/// Обложка текущего альбома, инфо о треке, шкала позиции и транспорт. Позиция
+/// интерполируется локальным таймером (`TimelineView`) по `store.displayPosition`.
 private struct NowPlayingPanel: View {
     @ObservedObject var coordinator: RemoteClientCoordinator
     @ObservedObject var store: RemoteClientStore
+    @ObservedObject var artwork: AlbumArtworkStore
 
     /// Локальная позиция слайдера во время перетаскивания — пока пользователь
     /// тянет, не даём интерполяции/пушам дёргать ползунок; на отпускании — `seek`.
     @State private var scrubPosition: Double?
 
+    init(coordinator: RemoteClientCoordinator) {
+        self.coordinator = coordinator
+        self.store = coordinator.store
+        self.artwork = coordinator.artwork
+    }
+
     var body: some View {
-        VStack(spacing: 14) {
+        VStack(spacing: 16) {
+            artworkView
             trackInfo
             scrubber
             transport
+        }
+    }
+
+    /// Обложка альбома текущего трека. Первичен `currentAlbumId` из состояния —
+    /// каноничный id ГРУППЫ каталога iPhone, гарантированно тот же, что в гриде
+    /// библиотеки (у сборников/VA артист трека ≠ артисту группы, реконструкция
+    /// из тегов трека дала бы другой ключ и промах кэша). Фоллбэк на
+    /// `RemoteAlbumID.of(track:)` — для старых телефонов без поля.
+    @ViewBuilder
+    private var artworkView: some View {
+        if let track = store.playerState?.current {
+            ArtworkThumbnail(
+                albumId: store.playerState?.currentAlbumId ?? RemoteAlbumID.of(track: track),
+                artwork: artwork, cornerRadius: 12)
+                .frame(width: 220, height: 220)
+                .shadow(radius: 8, y: 4)
+        } else {
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color.secondary.opacity(0.12))
+                .frame(width: 220, height: 220)
+                .overlay(
+                    Image(systemName: "music.note")
+                        .font(.system(size: 44))
+                        .foregroundStyle(.secondary)
+                )
         }
     }
 
@@ -139,14 +172,9 @@ private struct NowPlayingPanel: View {
             .multilineTextAlignment(.center)
             .frame(maxWidth: .infinity)
         } else {
-            VStack(spacing: 4) {
-                Image(systemName: "music.note")
-                    .font(.system(size: 30))
-                    .foregroundStyle(.secondary)
-                Text("Ничего не играет")
-                    .foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: .infinity)
+            Text("Ничего не играет")
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity)
         }
     }
 
@@ -224,6 +252,89 @@ private struct NowPlayingPanel: View {
     /// `мм:сс` для шкалы; отрицательные/NaN → `0:00`.
     private func timeLabel(_ seconds: Double) -> String {
         guard seconds.isFinite, seconds > 0 else { return "0:00" }
+        let total = Int(seconds.rounded())
+        return String(format: "%d:%02d", total / 60, total % 60)
+    }
+}
+
+// MARK: - Очередь (из текущего состояния плеера)
+
+/// Текущая очередь воспроизведения из последнего `RemotePlayerState` (что реально
+/// стоит в плеере iPhone), с подсветкой играющего трека (`currentIndex`).
+private struct QueueSection: View {
+    @ObservedObject var store: RemoteClientStore
+
+    var body: some View {
+        let queue = store.playerState?.queue ?? []
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("Очередь")
+                    .font(.headline)
+                Spacer()
+                if !queue.isEmpty {
+                    Text(queue.count == 1 ? "1 трек" : "\(queue.count) треков")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            if queue.isEmpty {
+                VStack(spacing: 8) {
+                    Image(systemName: "list.number")
+                        .font(.system(size: 28))
+                        .foregroundStyle(.secondary)
+                    Text("Очередь пуста")
+                        .foregroundStyle(.secondary)
+                    Text("Запустите альбом из вкладки «Библиотека».")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding(20)
+            } else {
+                let currentIndex = store.playerState?.currentIndex
+                List {
+                    ForEach(Array(queue.enumerated()), id: \.offset) { index, track in
+                        HStack(spacing: 8) {
+                            if index == currentIndex {
+                                Image(systemName: store.isPlaying ? "speaker.wave.2.fill" : "pause.fill")
+                                    .font(.caption)
+                                    .foregroundStyle(Color.accentColor)
+                                    .frame(width: 18)
+                            } else {
+                                Text("\(index + 1)")
+                                    .font(.caption.monospacedDigit())
+                                    .foregroundStyle(.tertiary)
+                                    .frame(width: 18, alignment: .trailing)
+                            }
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(track.title)
+                                    .lineLimit(1)
+                                if let artist = track.artist, !artist.isEmpty {
+                                    Text(artist)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                }
+                            }
+                            Spacer()
+                            Text(durationLabel(track.duration))
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+                        .fontWeight(index == currentIndex ? .semibold : .regular)
+                    }
+                }
+                .listStyle(.inset)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func durationLabel(_ seconds: Double) -> String {
+        guard seconds.isFinite, seconds > 0 else { return "—" }
         let total = Int(seconds.rounded())
         return String(format: "%d:%02d", total / 60, total % 60)
     }

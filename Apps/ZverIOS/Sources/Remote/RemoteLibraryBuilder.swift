@@ -34,15 +34,38 @@ enum RemoteLibraryBuilder {
     }
 
     /// Запись альбома для списка: id/title/artist/year/trackCount. `year` —
-    /// из первого трека группы (год альбома в MVP).
+    /// из первого трека группы (год альбома в MVP). `cloudState` — агрегат для
+    /// бейджа облака в библиотеке на Маке.
     static func remoteAlbum(from group: AlbumGroup) -> RemoteAlbum {
         RemoteAlbum(
             id: albumId(for: group),
             title: group.album,
             artist: group.artist,
             year: group.tracks.first?.year,
-            trackCount: group.tracks.count
+            trackCount: group.tracks.count,
+            cloudState: cloudState(of: group)
         )
+    }
+
+    /// Агрегированное облачное состояние альбома для Мака: все треки локальные →
+    /// `local`, все в облаке с локальной копией → `backedUp`, все только в
+    /// облаке → `remote`, вперемешку (включая активные передачи) → `mixed`.
+    static func cloudState(of group: AlbumGroup) -> String {
+        var hasLocal = false, hasBackedUp = false, hasRemote = false, hasOther = false
+        for track in group.tracks {
+            switch track.fileState {
+            case .local: hasLocal = true
+            case .backedUp: hasBackedUp = true
+            case .remote: hasRemote = true
+            case .uploading, .downloading: hasOther = true
+            }
+        }
+        switch (hasLocal, hasBackedUp, hasRemote, hasOther) {
+        case (true, false, false, false): return "local"
+        case (false, true, false, false): return "backedUp"
+        case (false, false, true, false): return "remote"
+        default: return "mixed"
+        }
     }
 
     /// DTO трека для протокола. `id` — стабильный путь файла (`Track.id`),
@@ -63,6 +86,16 @@ enum RemoteLibraryBuilder {
     /// и альбом исчез — пульт получит пустой ответ/ошибку, соединение живёт).
     static func group(withId albumId: String, in groups: [AlbumGroup]) -> AlbumGroup? {
         groups.first { self.albumId(for: $0) == albumId }
+    }
+
+    /// Каноничный id альбома, СОДЕРЖАЩЕГО трек — id группы каталога, не
+    /// реконструкция из тегов трека (у сборников/VA артист трека ≠ артисту
+    /// группы). Для `RemotePlayerState.currentAlbumId`: ключ обложки
+    /// now-playing на Маке обязан совпадать с ключами грида библиотеки.
+    static func albumId(containingTrackId trackId: String,
+                        in groups: [AlbumGroup]) -> String? {
+        groups.first { group in group.tracks.contains { $0.id == trackId } }
+            .map(albumId(for:))
     }
 
     /// Треки альбома в порядке группы (как сгруппировал `AlbumGroup.group`).

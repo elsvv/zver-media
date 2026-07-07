@@ -22,6 +22,10 @@ final class RemoteClientStore: ObservableObject {
     /// Кэш треков по `albumId` — заполняется ответами `albumTracks` на запрос
     /// раскрытия альбома. UI читает по ключу выбранного альбома.
     @Published private(set) var albumTracks: [String: [RemoteTrack]] = [:]
+    /// Последний агрегированный статус headless-импорта, запущенного с ЭТОГО Мака
+    /// (`startImport`). Пуш от iPhone; вкладка «Синк» рисует стадию/долю. nil —
+    /// импорт с Мака в этой сессии не запускался (или сброшен на дисконнекте).
+    @Published private(set) var importStatus: RemoteImportStatus?
     /// Последняя ошибка протокола от iPhone (`error{message}`) — для тоста/баннера.
     @Published private(set) var lastError: String?
 
@@ -44,6 +48,8 @@ final class RemoteClientStore: ObservableObject {
             self.library = library
         case let .albumTracks(albumId, tracks):
             albumTracks[albumId] = tracks
+        case let .importStatus(status):
+            importStatus = status
         case let .error(message):
             lastError = message
         default:
@@ -92,6 +98,7 @@ final class RemoteClientStore: ObservableObject {
         playerState = nil
         library = nil
         albumTracks = [:]
+        importStatus = nil
         lastError = nil
         positionBaseline = 0
         positionBaselineAt = .distantPast

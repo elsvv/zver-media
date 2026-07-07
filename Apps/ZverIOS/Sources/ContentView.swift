@@ -45,6 +45,15 @@ struct ContentView: View {
         // Пульт держит слабые ссылки на engine/library — оба живут весь сеанс как
         // @StateObject. Сервер не запускается, пока пользователь не включит тумблер.
         let engine = PlayerEngine()
+        // Headless-импорт по команде Мака (этап «Mac-редизайн»): тот же
+        // пост-импортный rescan+автобэкап, что у кнопки в MacImportView.
+        let importLauncher = RemoteImportLauncher(rescan: { [weak library, weak account, weak backup] in
+            await library?.refresh()
+            if account?.isAuthorized == true,
+               UserDefaults.standard.object(forKey: SettingsView.autoBackupKey) as? Bool ?? true {
+                await backup?.backupAwaitingTracks()
+            }
+        })
         // История прослушивания: движок отдаёт события (что играло, сколько,
         // чем закончилось), LibraryStore превращает их в строки playEvent
         // с переносимыми ключами. Оба живут весь сеанс как @StateObject.
@@ -53,7 +62,9 @@ struct ContentView: View {
                                      playedSeconds: played, reason: reason)
         }
         _engine = StateObject(wrappedValue: engine)
-        _remote = StateObject(wrappedValue: RemoteControlService(player: engine, library: library))
+        let remote = RemoteControlService(player: engine, library: library)
+        remote.importLauncher = importLauncher
+        _remote = StateObject(wrappedValue: remote)
         let brain = BrainAccount()
         _brain = StateObject(wrappedValue: brain)
         _homeFeed = StateObject(wrappedValue: HomeFeedService(library: library, account: brain))

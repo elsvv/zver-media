@@ -50,6 +50,13 @@ final class RemoteClientCoordinator: ObservableObject {
     /// Агрегатор принятого состояния/библиотеки для вью пульта.
     let store: RemoteClientStore
 
+    /// Кэш обложек альбомов (грид библиотеки + now-playing пульта). Промах диска
+    /// тянет обложку через `requestArtwork`; входящий `.artwork` кладётся сюда.
+    let artwork = AlbumArtworkStore()
+
+    /// Соединение установлено и авторизовано — можно слать команды/запускать синк.
+    var isConnected: Bool { status == .connected }
+
     // MARK: - Зависимости (рантайм-сеть за протоколами)
 
     private let browser: ServiceBrowser
@@ -81,6 +88,11 @@ final class RemoteClientCoordinator: ObservableObject {
         self.pairing = pairing
         self.store = store
         self.autoStart = autoStart
+        // Промах кэша обложек → сетевой запрос iPhone. Замыкание держит weak self,
+        // чтобы кэш не удерживал координатор.
+        artwork.onNeedArtwork = { [weak self] albumId in
+            self?.requestArtwork(albumId: albumId)
+        }
     }
 
     // MARK: - Жизненный цикл browse
@@ -113,6 +125,7 @@ final class RemoteClientCoordinator: ObservableObject {
         isAuthorized = false
         needsPairingCode = false
         store.reset()
+        artwork.reset()
         devices = []
         status = .idle
     }
@@ -242,13 +255,17 @@ final class RemoteClientCoordinator: ObservableObject {
                 status = .pairing
             }
 
+        case let .artwork(albumId, data):
+            // Обложка — в кэш (не в store): грид/now-playing читают `artwork`.
+            artwork.ingest(albumId: albumId, data: data)
+
         case .error:
             // Протокольная ошибка от iPhone — отдаём в store для баннера, статус
             // не роняем (соединение живо).
             store.apply(message)
 
         default:
-            // Пуши state/library/albumTracks — в агрегатор UI.
+            // Пуши state/library/albumTracks/importStatus — в агрегатор UI.
             store.apply(message)
         }
     }
@@ -265,6 +282,7 @@ final class RemoteClientCoordinator: ObservableObject {
         isAuthorized = false
         needsPairingCode = false
         store.reset()
+        artwork.reset()
         status = .offline
     }
 
@@ -299,4 +317,9 @@ final class RemoteClientCoordinator: ObservableObject {
     func playAlbum(albumId: String, startIndex: Int) {
         send(.playAlbum(albumId: albumId, startIndex: startIndex))
     }
+    /// Запускает headless-импорт с этого Мака на iPhone (Мак спарен/авторизован).
+    /// Прогресс придёт пушами `importStatus` → `store.importStatus`.
+    func startImport() { send(.startImport) }
+    /// Просит обложку альбома у iPhone (зовётся кэшом на промахе диска).
+    func requestArtwork(albumId: String) { send(.requestArtwork(albumId: albumId)) }
 }

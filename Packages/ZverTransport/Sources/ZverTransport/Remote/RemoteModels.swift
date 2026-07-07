@@ -59,17 +59,69 @@ public struct RemoteAlbum: Codable, Equatable, Sendable {
     public var artist: String?
     public var year: Int?
     public var trackCount: Int
+    /// Агрегат облачного состояния по трекам альбома: `local|backedUp|remote|mixed`.
+    /// Аддитивное опциональное поле — синтезированный декод использует
+    /// decodeIfPresent, поэтому старый JSON без ключа декодится в `nil`.
+    public var cloudState: String?
 
     public init(id: String,
                 title: String,
                 artist: String? = nil,
                 year: Int? = nil,
-                trackCount: Int) {
+                trackCount: Int,
+                cloudState: String? = nil) {
         self.id = id
         self.title = title
         self.artist = artist
         self.year = year
         self.trackCount = trackCount
+        self.cloudState = cloudState
+    }
+}
+
+/// Агрегированный прогресс headless-импорта на iPhone (запущенного командой
+/// `startImport` с Мака). Один статус на весь прогон, а не пофайловый спам —
+/// Mac рисует стадию и общую долю (см. `RemotePayload.importStatus`).
+public struct RemoteImportStatus: Codable, Equatable, Sendable {
+    /// Стадия импорта. Раздельный enum со строковым `rawValue` — forward-compat:
+    /// новая стадия будущей версии декодится в `.unknown`, а не роняет весь
+    /// декод (как `RemotePlayback`).
+    public enum Phase: String, Codable, Equatable, Sendable {
+        case idle
+        case downloading
+        case done
+        case failed
+        /// Неизвестная будущей версии стадия — соединение не рвём.
+        case unknown
+
+        public init(from decoder: any Decoder) throws {
+            let raw = try decoder.singleValueContainer().decode(String.self)
+            self = Phase(rawValue: raw) ?? .unknown
+        }
+    }
+
+    public var phase: Phase
+    /// Какой альбом сейчас качается (для UI); обычно nil вне `.downloading`.
+    public var albumTitle: String?
+    public var completedAlbums: Int
+    public var totalAlbums: Int
+    /// Общий прогресс 0…1.
+    public var fraction: Double
+    /// Текст ошибки для `.failed`.
+    public var message: String?
+
+    public init(phase: Phase,
+                albumTitle: String? = nil,
+                completedAlbums: Int,
+                totalAlbums: Int,
+                fraction: Double,
+                message: String? = nil) {
+        self.phase = phase
+        self.albumTitle = albumTitle
+        self.completedAlbums = completedAlbums
+        self.totalAlbums = totalAlbums
+        self.fraction = fraction
+        self.message = message
     }
 }
 
@@ -90,16 +142,23 @@ public struct RemotePlayerState: Codable, Equatable, Sendable {
     public var position: Double
     public var queue: [RemoteTrack]
     public var currentIndex: Int?
+    /// Каноничный id альбома ТЕКУЩЕГО трека — тот же, что в `RemoteLibrary`
+    /// (id ГРУППЫ каталога, а не реконструкция из тегов трека: у сборников/VA
+    /// артист трека ≠ артисту группы, и ключ обложки now-playing иначе
+    /// разошёлся бы с гридом библиотеки). Аддитивно: nil от старых телефонов.
+    public var currentAlbumId: String?
 
     public init(playback: RemotePlayback,
                 current: RemoteTrack? = nil,
                 position: Double,
                 queue: [RemoteTrack],
-                currentIndex: Int? = nil) {
+                currentIndex: Int? = nil,
+                currentAlbumId: String? = nil) {
         self.playback = playback
         self.current = current
         self.position = position
         self.queue = queue
         self.currentIndex = currentIndex
+        self.currentAlbumId = currentAlbumId
     }
 }
