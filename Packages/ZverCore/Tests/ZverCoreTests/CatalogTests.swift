@@ -20,7 +20,8 @@ import Testing
                 """
             )
         }
-        #expect(tables == ["favorite", "playEvent", "playlist", "playlistTrack", "track"])
+        #expect(tables == ["favorite", "playEvent", "playlist", "playlistTrack",
+                           "recommendation", "track"])
     }
 
     @Test func reopeningSameDatabaseIsIdempotent() throws {
@@ -412,6 +413,57 @@ import Testing
         }
         let count = try catalog.dbQueue.read { db in try TrackRecord.fetchCount(db) }
         #expect(count == 1)
+    }
+
+    // MARK: - Миграция v7 (recommendation)
+
+    @Test func migrationV7CreatesRecommendationTableWithColumnsAndIndex() throws {
+        let catalog = try Catalog.inMemory()
+        let columns = try catalog.dbQueue.read { db in
+            try db.columns(in: "recommendation").map(\.name)
+        }
+        #expect(columns == ["id", "artist", "album", "normKey", "year", "category",
+                            "reason", "status", "genre", "appleMusicURL", "artworkURL",
+                            "itunesId", "links", "shownAt", "updatedAt"])
+        // autoincrement PK на id
+        let pk = try catalog.dbQueue.read { db in try db.primaryKey("recommendation").columns }
+        #expect(pk == ["id"])
+        // индекс на shownAt (выборки «показанного недавно»)
+        let indexes = try catalog.dbQueue.read { db in
+            try String.fetchAll(
+                db,
+                sql: "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'recommendation'"
+            )
+        }
+        #expect(indexes.contains("recommendation_shownAt"))
+    }
+
+    @Test func migrationV7EnforcesUniqueNormKey() throws {
+        let catalog = try Catalog.inMemory()
+        let insert = """
+            INSERT INTO recommendation (artist, album, normKey, status, shownAt, updatedAt)
+            VALUES (?, ?, ?, 'shown', ?, ?)
+            """
+        let now = Date(timeIntervalSince1970: 1_000)
+        try catalog.dbQueue.write { db in
+            try db.execute(sql: insert, arguments: ["A", "Alpha", "a|alpha", now, now])
+        }
+
+        #expect(throws: DatabaseError.self) {
+            try catalog.dbQueue.write { db in
+                try db.execute(sql: insert, arguments: ["A", "Alpha!", "a|alpha", now, now])
+            }
+        }
+    }
+
+    @Test func migrationV7IsAdditiveKeepingExistingTracks() throws {
+        // v7 не должна затрагивать `track`.
+        let catalog = try Catalog.inMemory()
+        try catalog.dbQueue.write { db in
+            try TrackRecord(relativePath: "a.flac", title: "А",
+                            duration: 1, sampleRate: 44100).insert(db)
+        }
+        #expect(try catalog.dbQueue.read { db in try TrackRecord.fetchCount(db) } == 1)
     }
 
     // MARK: - Roundtrip TrackRecord
