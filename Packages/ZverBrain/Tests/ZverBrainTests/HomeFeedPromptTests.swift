@@ -109,4 +109,55 @@ import Foundation
         #expect(first.system == second.system)
         #expect(first.user == second.user)
     }
+
+    // MARK: - Свои инструкции слушателя
+
+    @Test func legacyBuildWithoutInstructionsStillCompilesAndMatchesBase() {
+        // Старый вызов build(snapshot:) — параметр по умолчанию nil, база не тронута.
+        let (system, _) = HomeFeedPrompt.build(snapshot: sampleSnapshot())
+        #expect(system == HomeFeedPrompt.systemPrompt)
+        #expect(!system.contains("Пожелания слушателя"))
+    }
+
+    @Test func customInstructionsAppendedToEndOfSystem() {
+        let (system, _) = HomeFeedPrompt.build(
+            snapshot: sampleSnapshot(),
+            customInstructions: "Больше джаза и меньше попсы"
+        )
+        // База целиком сохранена как префикс, пожелания — в конце.
+        #expect(system.hasPrefix(HomeFeedPrompt.systemPrompt))
+        #expect(system.contains("Пожелания слушателя"))
+        #expect(system.contains("Больше джаза и меньше попсы"))
+        // Оговорка про неизменность формата присутствует.
+        #expect(system.contains("JSON-схема выше всегда главнее"))
+        // Секция именно в конце.
+        #expect(system.hasSuffix("Больше джаза и меньше попсы"))
+    }
+
+    @Test func emptyCustomInstructionsAreIgnored() {
+        let (system, _) = HomeFeedPrompt.build(snapshot: sampleSnapshot(), customInstructions: "")
+        #expect(system == HomeFeedPrompt.systemPrompt)
+        #expect(!system.contains("Пожелания слушателя"))
+    }
+
+    @Test func whitespaceOnlyCustomInstructionsAreIgnored() {
+        let (system, _) = HomeFeedPrompt.build(snapshot: sampleSnapshot(), customInstructions: "   \n\t  ")
+        #expect(system == HomeFeedPrompt.systemPrompt)
+        #expect(!system.contains("Пожелания слушателя"))
+    }
+
+    @Test func customInstructionsAreTrimmed() {
+        let (system, _) = HomeFeedPrompt.build(
+            snapshot: sampleSnapshot(),
+            customInstructions: "  край пробелов  "
+        )
+        // Обрезка по краям: в хвосте нет лишних пробелов/переводов строк.
+        #expect(system.hasSuffix("край пробелов"))
+    }
+
+    @Test func customInstructionsDoNotChangeUserPrompt() {
+        let base = HomeFeedPrompt.build(snapshot: sampleSnapshot())
+        let withInstr = HomeFeedPrompt.build(snapshot: sampleSnapshot(), customInstructions: "что-то")
+        #expect(base.user == withInstr.user)
+    }
 }

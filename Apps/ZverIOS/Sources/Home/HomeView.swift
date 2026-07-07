@@ -9,7 +9,7 @@ struct HomeView: View {
     @ObservedObject var store: LibraryStore
     @ObservedObject var engine: PlayerEngine
     @ObservedObject var feedService: HomeFeedService
-    @ObservedObject var account: BrainAccount
+    @ObservedObject var profiles: BrainProfilesStore
 
     @State private var recentlyPlayed: [AlbumGroup] = []
     @State private var confirmsRefresh = false
@@ -93,7 +93,7 @@ struct HomeView: View {
                     Button("Попробовать ещё раз") { confirmsRefresh = true }
                 }
             case .idle:
-                if account.isConfigured {
+                if profiles.isConfigured {
                     ContentUnavailableView {
                         Label("Лента ещё не собрана", systemImage: "sparkles")
                     } description: {
@@ -102,10 +102,10 @@ struct HomeView: View {
                     }
                 } else {
                     ContentUnavailableView {
-                        Label("Интеллект не настроен", systemImage: "sparkles")
+                        Label("ИИ не настроен", systemImage: "sparkles")
                     } description: {
-                        Text("Укажи API-ключ, base URL и модель в Настройках →" +
-                             " Интеллект, и здесь появятся умные подборки.")
+                        Text("Создай профиль провайдера (ключ, модель, тип API)" +
+                             " в Настройках → ИИ, и здесь появятся умные подборки.")
                     }
                 }
             }

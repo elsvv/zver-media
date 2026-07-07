@@ -23,8 +23,8 @@ struct SettingsView: View {
     @ObservedObject var remote: RemoteControlService
     /// Плеер — для пикера режима паузы в секции «Пульт» (`pauseMode`).
     @ObservedObject var player: PlayerEngine
-    /// Аккаунт «Интеллекта» (LLM-рекомендации): секция настроек провайдера.
-    @ObservedObject var brain: BrainAccount
+    /// Профили «ИИ» (LLM-рекомендации): секции профилей и своих инструкций.
+    @ObservedObject var brain: BrainProfilesStore
 
     @State private var tokenInput: String = ""
     @State private var errorMessage: String?
@@ -45,7 +45,7 @@ struct SettingsView: View {
             if account.isAuthorized {
                 backupSection
             }
-            BrainSettingsView(account: brain)
+            BrainSettingsView(store: brain)
             RemoteSettingsView(remote: remote, player: player)
             aboutSection
         }

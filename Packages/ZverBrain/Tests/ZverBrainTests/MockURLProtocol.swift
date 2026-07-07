@@ -17,12 +17,16 @@ final class MockURLProtocol: URLProtocol {
     private static let lock = NSLock()
     nonisolated(unsafe) private static var _stub = Stub()
     nonisolated(unsafe) private static var _lastRequestBody: Data?
+    nonisolated(unsafe) private static var _lastRequestURL: URL?
+    nonisolated(unsafe) private static var _lastRequestHeaders: [String: String]?
 
-    /// Задать ответ и сбросить запомненное тело запроса.
+    /// Задать ответ и сбросить запомненное про предыдущий запрос.
     static func setStub(_ stub: Stub) {
         lock.lock(); defer { lock.unlock() }
         _stub = stub
         _lastRequestBody = nil
+        _lastRequestURL = nil
+        _lastRequestHeaders = nil
     }
 
     /// Тело последнего перехваченного запроса (декодированное из body-stream).
@@ -31,14 +35,28 @@ final class MockURLProtocol: URLProtocol {
         return _lastRequestBody
     }
 
+    /// URL последнего перехваченного запроса (для проверки endpoint-пути).
+    static func lastRequestURL() -> URL? {
+        lock.lock(); defer { lock.unlock() }
+        return _lastRequestURL
+    }
+
+    /// Заголовки последнего перехваченного запроса (для проверки авторизации).
+    static func lastRequestHeaders() -> [String: String]? {
+        lock.lock(); defer { lock.unlock() }
+        return _lastRequestHeaders
+    }
+
     private static func currentStub() -> Stub {
         lock.lock(); defer { lock.unlock() }
         return _stub
     }
 
-    private static func recordRequestBody(_ data: Data?) {
+    private static func recordRequest(body: Data?, url: URL?, headers: [String: String]?) {
         lock.lock(); defer { lock.unlock() }
-        _lastRequestBody = data
+        _lastRequestBody = body
+        _lastRequestURL = url
+        _lastRequestHeaders = headers
     }
 
     // MARK: - URLProtocol
@@ -47,7 +65,11 @@ final class MockURLProtocol: URLProtocol {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
-        MockURLProtocol.recordRequestBody(Self.bodyData(from: request))
+        MockURLProtocol.recordRequest(
+            body: Self.bodyData(from: request),
+            url: request.url,
+            headers: request.allHTTPHeaderFields
+        )
         let stub = MockURLProtocol.currentStub()
 
         if let error = stub.error {
