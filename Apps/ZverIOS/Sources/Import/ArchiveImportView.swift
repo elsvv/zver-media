@@ -194,16 +194,21 @@ struct ArchiveReleaseView: View {
     @ViewBuilder
     private var downloadBar: some View {
         if let release, !release.flacFiles.isEmpty {
+            // Пока центр ведёт этот релиз — кнопка неактивна: иначе повторный тап (или
+            // возврат в список и повторный вход) поставил бы дубль на ту же загрузку.
+            let active = center.isActive(release.identifier)
             Button {
                 let title = item.title ?? release.title ?? release.identifier
                 center.enqueue(release, title: title)
             } label: {
-                Label("Скачать альбом (\(release.flacFiles.count))", systemImage: "arrow.down.circle.fill")
+                Label(active ? "Загружается…" : "Скачать альбом (\(release.flacFiles.count))",
+                      systemImage: active ? "arrow.down.circle" : "arrow.down.circle.fill")
                     .frame(maxWidth: .infinity)
                     .font(.body.weight(.semibold))
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
+            .disabled(active)
             .padding()
             .background(.ultraThinMaterial)
         }

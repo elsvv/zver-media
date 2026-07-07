@@ -2,49 +2,79 @@ import Foundation
 import ZverImport
 
 /// Рантайм-загрузчик файлов Internet Archive поверх `URLSession` с докачкой по HTTP
-/// `Range`. Тонкий сетевой адаптер (образец — `DownloadEngine`/`URLSessionHTTPClient`):
-/// чистая логика (построение URL, разбор метаданных, фильтр форматов) живёт в
-/// `ZverImport`; здесь — перенос байт на диск, диспозиция по статусу и прогресс.
-/// Тестами не покрываем (рантайм-сеть за делегатом — лессон прошлых этапов), проверяется
-/// компиляцией.
+/// `Range`. Тонкий сетевой адаптер (образец — `NWFileDownloader`/`DownloadEngine`):
+/// чистая логика (построение URL, разбор метаданных, фильтр форматов, раскладка тела на
+/// диск — `ArchiveFileSink`) живёт в `ZverImport`; здесь — перенос байт с сети в приёмник,
+/// диспозиция по статусу и прогресс.
+///
+/// Тело ответа **стримим на диск** через `URLSessionDataTask` (а не `downloadTask`):
+/// `downloadTask` пишет тело во внутренний temp системы и отдаёт его только в
+/// `didFinishDownloadingTo` при ПОЛНОМ успехе — при обрыве temp отбрасывается, и докачка
+/// не работала бы (частичного файла на диске нет). С `dataTask` частичный префикс остаётся
+/// в `destination`, поэтому следующая попытка стартует с `ArchiveFileSink.partialSize` и
+/// просит хвост заголовком `Range`.
 ///
 /// Один экземпляр обслуживает последовательную очередь `ArchiveDownloadCenter` (файлы
 /// качаются по одному). `@unchecked Sendable`: всё мутабельное состояние активных
 /// загрузок — под `lock`, а `URLSession` потокобезопасна.
 final class ArchiveDownloader: NSObject, @unchecked Sendable {
-    /// Ошибка загрузки файла.
-    enum DownloadError: Error {
-        /// Сервер вернул не-2xx (частичный файл при этом не тронут — докачка переживёт).
-        case http(Int)
-    }
-
     private let lock = NSLock()
-    private lazy var session: URLSession = URLSession(
-        configuration: .default, delegate: self, delegateQueue: nil)
+    private lazy var session: URLSession = {
+        let config = URLSessionConfiguration.default
+        // Тело стримим на диск — кэш ответа не нужен и вреден (hi-res FLAC сотни МБ).
+        config.urlCache = nil
+        config.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return URLSession(configuration: config, delegate: self, delegateQueue: nil)
+    }()
 
     /// Состояние одной активной загрузки (ключ — `taskIdentifier`).
-    private struct Job {
+    private final class Job {
         let continuation: CheckedContinuation<Void, Error>
-        let destination: URL
         let resumeFrom: Int64
-        /// Полный размер файла из метаданных (для доли прогресса); nil → по данным задачи.
+        /// Полный размер файла из метаданных (для доли прогресса); nil → по данным ответа.
         let expectedTotal: Int64?
         let progress: @Sendable (Double) -> Void
-        /// Ошибка раскладки файла в `didFinishDownloadingTo` — фейлим ею в `didComplete`.
-        var finishError: Error?
+        let sink: ArchiveFileSink
+        /// Полный размер по `Content-Length` ответа — fallback, если метаданные без size.
+        var responseTotal: Int64?
+        /// Ошибка (не-2xx или запись на диск) — фейлим ею в `didComplete` поверх
+        /// синтетической ошибки отмены таска.
+        var failure: Error?
+
+        init(
+            continuation: CheckedContinuation<Void, Error>,
+            destination: URL,
+            resumeFrom: Int64,
+            expectedTotal: Int64?,
+            progress: @escaping @Sendable (Double) -> Void
+        ) {
+            self.continuation = continuation
+            self.resumeFrom = resumeFrom
+            self.expectedTotal = expectedTotal
+            self.progress = progress
+            self.sink = ArchiveFileSink(destination: destination)
+        }
+
+        /// Доля готовности файла: байты на диске к полному размеру (из метаданных или из
+        /// `Content-Length`). Без известного размера — 0 (доля неопределима).
+        func fraction() -> Double {
+            guard let total = expectedTotal ?? responseTotal, total > 0 else { return 0 }
+            return min(1.0, Double(sink.bytesOnDisk) / Double(total))
+        }
     }
     private var jobs: [Int: Job] = [:]
 
     /// Качает `url` в `destination`, дописывая уже скачанный префикс через `Range`
     /// (если он есть). `expectedBytes` — полный размер файла (для доли прогресса).
-    /// Бросает `DownloadError.http` на не-2xx и транспортные ошибки `URLSession`.
+    /// Бросает `ArchiveFileSink.DownloadError.http` на не-2xx и транспортные ошибки
+    /// `URLSession` (обрыв соединения → частичный префикс остаётся на диске).
     func download(
         from url: URL,
         to destination: URL,
         expectedBytes: Int64?,
         progress: @escaping @Sendable (Double) -> Void
     ) async throws {
-        let resumeFrom = Self.partialSize(destination)
+        let resumeFrom = ArchiveFileSink.partialSize(destination)
         var request = URLRequest(url: url)
         request.timeoutInterval = 60
         // Докачка: просим хвост от уже лежащего префикса — сервер ответит 206.
@@ -54,11 +84,12 @@ final class ArchiveDownloader: NSObject, @unchecked Sendable {
 
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-                let task = session.downloadTask(with: request)
-                lock.lock()
-                jobs[task.taskIdentifier] = Job(
+                let task = session.dataTask(with: request)
+                let job = Job(
                     continuation: cont, destination: destination, resumeFrom: resumeFrom,
-                    expectedTotal: expectedBytes, progress: progress, finishError: nil)
+                    expectedTotal: expectedBytes, progress: progress)
+                lock.lock()
+                jobs[task.taskIdentifier] = job
                 lock.unlock()
                 task.resume()
             }
@@ -67,100 +98,80 @@ final class ArchiveDownloader: NSObject, @unchecked Sendable {
             session.getAllTasks { tasks in tasks.forEach { $0.cancel() } }
         }
     }
-
-    // MARK: - Файловые помощники
-
-    /// Размер уже скачанного частичного файла (0, если файла нет) — позиция докачки.
-    static func partialSize(_ url: URL) -> Int64 {
-        let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
-        return (attrs?[.size] as? NSNumber)?.int64Value ?? 0
-    }
-
-    /// Раскладывает тело задачи на место по статусу: 206 при существующем префиксе —
-    /// дописываем хвост; 200/новый файл — перезаписываем целиком; не-2xx — не трогаем
-    /// приёмник и бросаем (частичный префикс переживает транзиентный сбой).
-    static func materialize(from tempURL: URL, to destination: URL, status: Int, resumeFrom: Int64) throws {
-        let fm = FileManager.default
-        guard (200..<300).contains(status) else { throw DownloadError.http(status) }
-
-        if status == 206, resumeFrom > 0, fm.fileExists(atPath: destination.path) {
-            let tail = try FileHandle(forReadingFrom: tempURL)
-            defer { try? tail.close() }
-            let out = try FileHandle(forWritingTo: destination)
-            defer { try? out.close() }
-            try out.seekToEnd()
-            while true {
-                let chunk = try tail.read(upToCount: 256 * 1024) ?? Data()
-                if chunk.isEmpty { break }
-                try out.write(contentsOf: chunk)
-            }
-        } else {
-            if fm.fileExists(atPath: destination.path) {
-                try? fm.removeItem(at: destination)
-            }
-            try fm.createDirectory(
-                at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try fm.copyItem(at: tempURL, to: destination)
-        }
-    }
 }
 
-extension ArchiveDownloader: URLSessionDownloadDelegate {
+extension ArchiveDownloader: URLSessionDataDelegate {
+    /// Пришли заголовки — открываем приёмник по статусу/позиции докачки и решаем
+    /// диспозицию: 2xx → продолжаем приём тела; не-2xx → отменяем (частичный префикс не
+    /// тронут), фейлим `DownloadError.http` в `didComplete`.
     func urlSession(
         _ session: URLSession,
-        downloadTask: URLSessionDownloadTask,
-        didWriteData bytesWritten: Int64,
-        totalBytesWritten: Int64,
-        totalBytesExpectedToWrite: Int64
+        dataTask: URLSessionDataTask,
+        didReceive response: URLResponse,
+        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
     ) {
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        let bodyLength = response.expectedContentLength   // длина тела, -1 если неизвестна
+
         lock.lock()
-        guard let job = jobs[downloadTask.taskIdentifier] else { lock.unlock(); return }
-        let expectedTotal = job.expectedTotal
-        let resumeFrom = job.resumeFrom
+        guard let job = jobs[dataTask.taskIdentifier] else {
+            lock.unlock()
+            completionHandler(.cancel)
+            return
+        }
+        do {
+            try job.sink.open(status: status, resumeFrom: job.resumeFrom)
+        } catch {
+            job.failure = error
+            lock.unlock()
+            completionHandler(.cancel)
+            return
+        }
+        // Fallback-оценка полного размера, если метаданные не дали size: у 206 тело — это
+        // хвост от resumeFrom, у 200 — весь файл.
+        if bodyLength > 0 {
+            job.responseTotal = (status == 206 && job.resumeFrom > 0)
+                ? job.resumeFrom + bodyLength : bodyLength
+        }
+        let fraction = job.fraction()
         let progress = job.progress
         lock.unlock()
 
-        let fraction: Double
-        if let expectedTotal, expectedTotal > 0 {
-            // Доля по полному размеру: уже лежащий префикс + скачанный хвост.
-            fraction = min(1.0, Double(resumeFrom + totalBytesWritten) / Double(expectedTotal))
-        } else if totalBytesExpectedToWrite > 0 {
-            fraction = min(1.0, Double(totalBytesWritten) / Double(totalBytesExpectedToWrite))
-        } else {
-            fraction = 0
+        progress(fraction)   // при докачке доля стартует не с нуля — сразу покажем префикс
+        completionHandler(.allow)
+    }
+
+    /// Порция тела — стримим на диск и репортим прогресс.
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        lock.lock()
+        guard let job = jobs[dataTask.taskIdentifier], job.failure == nil else { lock.unlock(); return }
+        do {
+            try job.sink.write(data)
+        } catch {
+            job.failure = error
+            lock.unlock()
+            dataTask.cancel()   // прекращаем приём — didComplete зафейлит ошибкой записи
+            return
         }
+        let fraction = job.fraction()
+        let progress = job.progress
+        lock.unlock()
         progress(fraction)
     }
 
-    func urlSession(
-        _ session: URLSession,
-        downloadTask: URLSessionDownloadTask,
-        didFinishDownloadingTo location: URL
-    ) {
-        // Раскладываем ДО завершения таска — `location` валиден только здесь.
-        lock.lock()
-        guard var job = jobs[downloadTask.taskIdentifier] else { lock.unlock(); return }
-        lock.unlock()
-
-        let status = (downloadTask.response as? HTTPURLResponse)?.statusCode ?? 0
-        do {
-            try ArchiveDownloader.materialize(
-                from: location, to: job.destination, status: status, resumeFrom: job.resumeFrom)
-        } catch {
-            job.finishError = error
-            lock.lock(); jobs[downloadTask.taskIdentifier] = job; lock.unlock()
-        }
-    }
-
+    /// Завершение таска: закрываем приёмник и резюмим continuation. Записанная ошибка
+    /// (`DownloadError.http`/запись) приоритетнее синтетической ошибки отмены таска.
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         lock.lock()
         guard let job = jobs.removeValue(forKey: task.taskIdentifier) else { lock.unlock(); return }
+        job.sink.close()
+        let failure = job.failure
         lock.unlock()
 
-        if let error {
+        if let failure {
+            job.continuation.resume(throwing: failure)
+        } else if let error {
             job.continuation.resume(throwing: error)
-        } else if let finishError = job.finishError {
-            job.continuation.resume(throwing: finishError)
         } else {
             job.continuation.resume()
         }

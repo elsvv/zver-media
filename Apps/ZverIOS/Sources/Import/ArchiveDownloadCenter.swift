@@ -15,6 +15,8 @@ final class ArchiveDownloadCenter: ObservableObject {
     /// Состояние одной загрузки релиза для UI.
     struct Item: Identifiable {
         let id: UUID
+        /// Идентификатор релиза IA — для дедупа постановки и дизейбла кнопки «Скачать».
+        let releaseIdentifier: String
         var title: String
         /// Доля готовности всего релиза 0...1.
         var fraction: Double
@@ -64,16 +66,29 @@ final class ArchiveDownloadCenter: ObservableObject {
         items.contains { $0.state == .downloading || $0.state == .importing }
     }
 
+    /// Ведёт ли центр этот релиз прямо сейчас (в очереди, качается или импортируется) —
+    /// для дедупа постановки и дизейбла кнопки «Скачать альбом». Источник правды — `items`
+    /// (в них живёт и ожидающая, и активная джоба; после `done`/`failed` — уже нет).
+    func isActive(_ releaseIdentifier: String) -> Bool {
+        items.contains {
+            $0.releaseIdentifier == releaseIdentifier
+                && ($0.state == .downloading || $0.state == .importing)
+        }
+    }
+
     // MARK: - Постановка в очередь
 
     /// Ставит релиз в очередь на скачивание. Повторную постановку уже активного релиза
-    /// (по identifier) игнорируем, чтобы не плодить дубли загрузок.
+    /// (в очереди / качается / импортируется) игнорируем, чтобы не плодить дубли загрузок:
+    /// проверяем `items` (а не только `pending`) — иначе повторный тап во время активной
+    /// загрузки прошёл бы мимо (джоба уже вынута из `pending` в run-задачу).
     func enqueue(_ release: ArchiveRelease, title: String) {
         guard !release.flacFiles.isEmpty else { return }
-        if pending.contains(where: { $0.release.identifier == release.identifier }) { return }
+        if isActive(release.identifier) { return }
 
         let id = UUID()
-        items.append(Item(id: id, title: title, fraction: 0, detail: "В очереди", state: .downloading))
+        items.append(Item(id: id, releaseIdentifier: release.identifier, title: title,
+                          fraction: 0, detail: "В очереди", state: .downloading))
         pending.append((id: id, release: release, title: title))
         pump()
     }
@@ -159,7 +174,7 @@ final class ArchiveDownloadCenter: ObservableObject {
 
     /// Качает файл с повтором: оборвавшуюся загрузку переигрываем, докачивая с уже
     /// скачанной позиции (частичный файл на диске переживает попытки). Отмену
-    /// (`CancellationError`) пробрасываем сразу — не ретраим.
+    /// пробрасываем сразу — не ретраим.
     private func downloadWithRetry(
         url: URL,
         to dest: URL,
@@ -171,15 +186,24 @@ final class ArchiveDownloadCenter: ObservableObject {
             do {
                 try await downloader.download(from: url, to: dest, expectedBytes: expectedBytes, progress: progress)
                 return
-            } catch is CancellationError {
-                throw CancellationError()
             } catch {
+                // Отмену не ретраим, пробрасываем сразу. Учитываем обе формы: Swift-отмену
+                // (`CancellationError`) и отмену задачи `URLSession` (`URLError.cancelled`),
+                // которую даёт `task.cancel()` — она НЕ `CancellationError`.
+                if Self.isCancellation(error) { throw error }
                 attempt += 1
                 if attempt >= maxAttemptsPerFile { throw error }
                 // Небольшая пауза перед докачкой — сеть могла флапнуть.
                 try? await Task.sleep(for: .seconds(1))
             }
         }
+    }
+
+    /// Отмена (не подлежит повтору): Swift-отмена задачи или отмена задачи `URLSession`.
+    private static func isCancellation(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        if let urlError = error as? URLError, urlError.code == .cancelled { return true }
+        return false
     }
 
     /// Уникальное плоское имя файла в staging: путь IA (`d1/01 track.flac`) сводим к
