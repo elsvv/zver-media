@@ -123,6 +123,12 @@ private struct BrainProfileEditor: View {
     @State private var isReplacingKey = false
     @State private var pendingKeyDeletion = false
     @State private var showsModelPicker = false
+    /// Пресет пишет kind И baseURL одновременно (см. `presetsMenu`) — onChange
+    /// на kind реагирует ПОСЛЕ обеих мутаций и не может отличить «это
+    /// поставил пресет» от «baseURL совпал с дефолтом старого типа по
+    /// совпадению». Явный флаг однозначен: пресет просит его синк-эвристику
+    /// не трогать значение, которое сам только что расставил.
+    @State private var suppressBaseURLSync = false
 
     init(store: BrainProfilesStore, profile: BrainProfile) {
         self.store = store
@@ -143,14 +149,15 @@ private struct BrainProfileEditor: View {
                         }
                     }
                     .onChange(of: profile.kind) { oldKind, newKind in
-                        // Подставляем дефолт НОВОГО типа только если поле было
-                        // пустым или равнялось дефолту именно СТАРОГО типа (не
-                        // трогали руками). Сравнение с дефолтом старого, а не
-                        // "с любым из трёх", — иначе пресет вроде «OpenAI · Chat
-                        // Completions» (kind=chatCompletions, но адрес — хост
-                        // OpenAI, а не OpenRouter) тут же откатился бы: его адрес
-                        // совпадает с дефолтом ДРУГОГО типа (openaiResponses) и
-                        // старая проверка приняла бы это за «не трогали».
+                        // Пресет уже расставил ОБА поля сам — эвристика ниже
+                        // ничего не трогает (см. suppressBaseURLSync).
+                        if suppressBaseURLSync {
+                            suppressBaseURLSync = false
+                            return
+                        }
+                        // Ручная смена Пикера: подставляем дефолт НОВОГО типа
+                        // только если поле было пустым или равнялось дефолту
+                        // именно СТАРОГО типа (не трогали руками).
                         if profile.baseURL.isEmpty
                             || profile.baseURL == oldKind.defaultBaseURL.absoluteString {
                             profile.baseURL = newKind.defaultBaseURL.absoluteString
@@ -172,6 +179,7 @@ private struct BrainProfileEditor: View {
                         } label: {
                             Image(systemName: "magnifyingglass")
                         }
+                        .disabled(URL(string: profile.baseURL)?.scheme?.hasPrefix("http") != true)
                         .accessibilityLabel("Найти модель")
                     }
                 } header: {
@@ -220,6 +228,14 @@ private struct BrainProfileEditor: View {
         Menu {
             ForEach(BrainProviderPreset.all) { preset in
                 Button(preset.name) {
+                    // Флаг — ТОЛЬКО когда kind реально меняется: onChange
+                    // фильтрует изменения по значению и не сработает при
+                    // выборе пресета с тем же типом, что уже стоит — тогда
+                    // флаг остался бы true и тихо съел бы следующую РУЧНУЮ
+                    // смену типа в Пикере.
+                    if preset.kind != profile.kind {
+                        suppressBaseURLSync = true
+                    }
                     profile.kind = preset.kind
                     profile.baseURL = preset.baseURL.absoluteString
                 }

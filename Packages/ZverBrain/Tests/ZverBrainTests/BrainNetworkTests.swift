@@ -596,6 +596,16 @@ struct BrainNetworkTests {
             #expect(models.isEmpty)
         }
 
+        @Test func skipsInvalidEntriesWithoutLosingValidOnes() async {
+            // Одна запись без id (или с id не-строкой) не должна ронять
+            // разбор всего массива — остальные валидные должны дойти.
+            MockURLProtocol.setStub(.init(statusCode: 200, body: Data(
+                #"{"data":[{"id":"good-1"},{"name":"no id here"},{"id":42},{"id":"good-2"}]}"#.utf8)))
+            let models = await ModelCatalogFetcher.fetchModels(
+                baseURL: Self.baseURL, kind: .chatCompletions, apiKey: "k", session: mockSession())
+            #expect(models.map(\.id) == ["good-1", "good-2"])
+        }
+
         @Test func resultsSortedById() async {
             MockURLProtocol.setStub(.init(statusCode: 200, body: Data(
                 #"{"data":[{"id":"zeta"},{"id":"alpha"}]}"#.utf8)))

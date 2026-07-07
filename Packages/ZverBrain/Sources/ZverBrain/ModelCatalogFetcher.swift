@@ -63,6 +63,7 @@ public enum ModelCatalogFetcher {
         else { return [] }
 
         return list.data
+            .compactMap(\.entry)
             .map { BrainModelSummary(id: $0.id, name: $0.name ?? $0.displayName) }
             .sorted { $0.id.localizedStandardCompare($1.id) == .orderedAscending }
     }
@@ -79,6 +80,19 @@ public enum ModelCatalogFetcher {
                 case displayName = "display_name"
             }
         }
-        let data: [Entry]
+
+        /// Одна запись, которая МОЖЕТ не разобраться (нет/не-строка `id` у
+        /// конкретного элемента) — не должна ронять парсинг всего массива.
+        /// Само `LossyEntry.init` не бросает НИКОГДА, поэтому стандартный
+        /// декодер `[LossyEntry]` корректно проходит по всем элементам
+        /// (в отличие от ручного `while !container.isAtEnd { try? … }`,
+        /// где try? на упавшем декоде не продвигает курсор и зацикливается).
+        struct LossyEntry: Decodable {
+            let entry: Entry?
+            init(from decoder: any Decoder) throws {
+                entry = try? Entry(from: decoder)
+            }
+        }
+        let data: [LossyEntry]
     }
 }
