@@ -512,4 +512,96 @@ struct BrainNetworkTests {
             #expect(client(for: .anthropicMessages) is AnthropicMessagesClient)
         }
     }
+
+    // MARK: - Живой каталог моделей (ModelCatalogFetcher)
+    //
+    // Нужен ВНУТРИ этого serialized-зонтика (не отдельным top-level suite):
+    // независимые .serialized-сьюты параллелятся МЕЖДУ собой и гоняются за
+    // одним статическим стабом MockURLProtocol — гонка (см. шапку файла).
+
+    @Suite struct ModelCatalog {
+        private static let baseURL = URL(string: "https://api.example.com/v1")!
+
+        @Test func chatCompletionsHitsModelsPath() async {
+            MockURLProtocol.setStub(.init(statusCode: 200, body: Data(#"{"data":[]}"#.utf8)))
+            _ = await ModelCatalogFetcher.fetchModels(
+                baseURL: Self.baseURL, kind: .chatCompletions, apiKey: "sk-x", session: mockSession())
+            #expect(lastURLPath().hasSuffix("/models"))
+            #expect(lastHeaders()["Authorization"] == "Bearer sk-x")
+        }
+
+        @Test func chatCompletionsWorksWithoutKey() async {
+            // OpenRouter отдаёт список моделей без авторизации.
+            MockURLProtocol.setStub(.init(statusCode: 200, body: Data(#"{"data":[{"id":"m1"}]}"#.utf8)))
+            let models = await ModelCatalogFetcher.fetchModels(
+                baseURL: Self.baseURL, kind: .chatCompletions, apiKey: nil, session: mockSession())
+            #expect(lastHeaders()["Authorization"] == nil)
+            #expect(models.map(\.id) == ["m1"])
+        }
+
+        @Test func anthropicSendsAPIKeyHeaderAndVersion() async {
+            MockURLProtocol.setStub(.init(statusCode: 200, body: Data(#"{"data":[]}"#.utf8)))
+            _ = await ModelCatalogFetcher.fetchModels(
+                baseURL: Self.baseURL, kind: .anthropicMessages, apiKey: "ak-x", session: mockSession())
+            #expect(lastHeaders()["x-api-key"] == "ak-x")
+            #expect(lastHeaders()["anthropic-version"] == "2023-06-01")
+            #expect(lastHeaders()["Authorization"] == nil)
+        }
+
+        @Test func anthropicWithoutKeySkipsNetworkEntirely() async {
+            // Без ключа Anthropic всё равно ответит 401 — не тратим round-trip.
+            MockURLProtocol.setStub(.init(statusCode: 200, body: Data(
+                #"{"data":[{"id":"claude-x"}]}"#.utf8)))
+            let models = await ModelCatalogFetcher.fetchModels(
+                baseURL: Self.baseURL, kind: .anthropicMessages, apiKey: nil, session: mockSession())
+            #expect(models.isEmpty)
+        }
+
+        @Test func parsesIdAndNameFields() async {
+            MockURLProtocol.setStub(.init(statusCode: 200, body: Data(
+                #"{"data":[{"id":"gpt-x","name":"GPT X"},{"id":"gpt-y"}]}"#.utf8)))
+            let models = await ModelCatalogFetcher.fetchModels(
+                baseURL: Self.baseURL, kind: .chatCompletions, apiKey: "k", session: mockSession())
+            #expect(models.count == 2)
+            #expect(models.first { $0.id == "gpt-x" }?.displayName == "GPT X")
+            #expect(models.first { $0.id == "gpt-y" }?.displayName == "gpt-y")
+        }
+
+        @Test func parsesAnthropicDisplayName() async {
+            MockURLProtocol.setStub(.init(statusCode: 200, body: Data(
+                #"{"data":[{"id":"claude-x","display_name":"Claude X"}]}"#.utf8)))
+            let models = await ModelCatalogFetcher.fetchModels(
+                baseURL: Self.baseURL, kind: .anthropicMessages, apiKey: "ak", session: mockSession())
+            #expect(models.first?.displayName == "Claude X")
+        }
+
+        @Test func non2xxStatusReturnsEmpty() async {
+            MockURLProtocol.setStub(.init(statusCode: 401, body: Data()))
+            let models = await ModelCatalogFetcher.fetchModels(
+                baseURL: Self.baseURL, kind: .chatCompletions, apiKey: "k", session: mockSession())
+            #expect(models.isEmpty)
+        }
+
+        @Test func malformedJSONReturnsEmpty() async {
+            MockURLProtocol.setStub(.init(statusCode: 200, body: Data("not json".utf8)))
+            let models = await ModelCatalogFetcher.fetchModels(
+                baseURL: Self.baseURL, kind: .chatCompletions, apiKey: "k", session: mockSession())
+            #expect(models.isEmpty)
+        }
+
+        @Test func transportErrorReturnsEmpty() async {
+            MockURLProtocol.setStub(.init(error: URLError(.notConnectedToInternet)))
+            let models = await ModelCatalogFetcher.fetchModels(
+                baseURL: Self.baseURL, kind: .chatCompletions, apiKey: "k", session: mockSession())
+            #expect(models.isEmpty)
+        }
+
+        @Test func resultsSortedById() async {
+            MockURLProtocol.setStub(.init(statusCode: 200, body: Data(
+                #"{"data":[{"id":"zeta"},{"id":"alpha"}]}"#.utf8)))
+            let models = await ModelCatalogFetcher.fetchModels(
+                baseURL: Self.baseURL, kind: .chatCompletions, apiKey: "k", session: mockSession())
+            #expect(models.map(\.id) == ["alpha", "zeta"])
+        }
+    }
 }

@@ -122,6 +122,7 @@ private struct BrainProfileEditor: View {
     /// «Отмена» шита не должна оставлять уже удалённый/заменённый ключ.
     @State private var isReplacingKey = false
     @State private var pendingKeyDeletion = false
+    @State private var showsModelPicker = false
 
     init(store: BrainProfilesStore, profile: BrainProfile) {
         self.store = store
@@ -141,21 +142,38 @@ private struct BrainProfileEditor: View {
                             Text(kind.displayName).tag(kind)
                         }
                     }
-                    .onChange(of: profile.kind) { _, newKind in
-                        // Смена типа подставляет его дефолтный адрес, если
-                        // пользователь не вписал свой (или там дефолт другого типа).
-                        let defaults = BrainAPIKind.allCases.map { $0.defaultBaseURL.absoluteString }
-                        if profile.baseURL.isEmpty || defaults.contains(profile.baseURL) {
+                    .onChange(of: profile.kind) { oldKind, newKind in
+                        // Подставляем дефолт НОВОГО типа только если поле было
+                        // пустым или равнялось дефолту именно СТАРОГО типа (не
+                        // трогали руками). Сравнение с дефолтом старого, а не
+                        // "с любым из трёх", — иначе пресет вроде «OpenAI · Chat
+                        // Completions» (kind=chatCompletions, но адрес — хост
+                        // OpenAI, а не OpenRouter) тут же откатился бы: его адрес
+                        // совпадает с дефолтом ДРУГОГО типа (openaiResponses) и
+                        // старая проверка приняла бы это за «не трогали».
+                        if profile.baseURL.isEmpty
+                            || profile.baseURL == oldKind.defaultBaseURL.absoluteString {
                             profile.baseURL = newKind.defaultBaseURL.absoluteString
                         }
                     }
-                    TextField("Base URL", text: $profile.baseURL)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .keyboardType(.URL)
-                    TextField("Модель", text: $profile.model)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
+                    HStack {
+                        TextField("Base URL", text: $profile.baseURL)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .keyboardType(.URL)
+                        presetsMenu
+                    }
+                    HStack {
+                        TextField("Модель", text: $profile.model)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                        Button {
+                            showsModelPicker = true
+                        } label: {
+                            Image(systemName: "magnifyingglass")
+                        }
+                        .accessibilityLabel("Найти модель")
+                    }
                 } header: {
                     Text("Провайдер")
                 }
@@ -174,7 +192,42 @@ private struct BrainProfileEditor: View {
                         .disabled(!canSave)
                 }
             }
+            .sheet(isPresented: $showsModelPicker) {
+                if let url = URL(string: profile.baseURL) {
+                    ModelPickerSheet(baseURL: url, kind: profile.kind,
+                                     apiKey: effectiveKey, initialQuery: profile.model) { model in
+                        profile.model = model
+                    }
+                }
+            }
         }
+    }
+
+    /// Ключ для живого запроса каталога моделей: только что введённый (новый
+    /// профиль/замена) или уже сохранённый в Keychain (существующий, не тронут).
+    private var effectiveKey: String? {
+        let trimmed = keyInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty { return trimmed }
+        if store.hasKey(profile.id), !pendingKeyDeletion {
+            return store.currentKey(for: profile.id)
+        }
+        return nil
+    }
+
+    /// Компактное меню известных провайдеров: выбор ставит СРАЗУ тип API и
+    /// адрес (повторяющаяся пара, которую иначе пришлось бы перепечатывать).
+    private var presetsMenu: some View {
+        Menu {
+            ForEach(BrainProviderPreset.all) { preset in
+                Button(preset.name) {
+                    profile.kind = preset.kind
+                    profile.baseURL = preset.baseURL.absoluteString
+                }
+            }
+        } label: {
+            Image(systemName: "list.bullet")
+        }
+        .accessibilityLabel("Пресеты провайдеров")
     }
 
     private var isNew: Bool { !store.profiles.contains { $0.id == profile.id } }
