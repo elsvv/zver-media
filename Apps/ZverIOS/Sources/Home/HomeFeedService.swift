@@ -51,14 +51,14 @@ final class HomeFeedService: ObservableObject {
     @Published private(set) var state: FeedState = .idle
 
     private let library: LibraryStore
-    private let account: BrainAccount
+    private let profiles: BrainProfilesStore
     private let cacheURL: URL
 
-    init(library: LibraryStore, account: BrainAccount,
+    init(library: LibraryStore, profiles: BrainProfilesStore,
          cacheURL: URL = URL.applicationSupportDirectory
              .appendingPathComponent("homefeed.json")) {
         self.library = library
-        self.account = account
+        self.profiles = profiles
         self.cacheURL = cacheURL
         loadCache()
     }
@@ -73,8 +73,8 @@ final class HomeFeedService: ObservableObject {
     /// строку), успех перезаписывает кэш. Повторный вызов при `loading` — no-op.
     func refresh() async {
         guard state != .loading else { return }
-        guard let config = account.config, account.isConfigured else {
-            state = .failed("Укажи ключ, base URL и модель в Настройках → Интеллект.")
+        guard let config = profiles.config, profiles.isConfigured else {
+            state = .failed("Создай профиль с ключом в Настройках → ИИ.")
             return
         }
         state = .loading
@@ -86,10 +86,14 @@ final class HomeFeedService: ObservableObject {
             state = .failed("Библиотека пуста — ленте не из чего собираться.")
             return
         }
-        let client = OpenAICompatibleClient(config: config,
-                                            tokenProvider: account.tokenProvider)
+        // Адаптер под тип API активного профиля (chat completions /
+        // OpenAI Responses / Anthropic Messages) — фабрика ZverBrain.
+        let client = BrainClientFactory.make(config: config,
+                                             tokenProvider: profiles.tokenProvider)
         do {
-            let (system, user) = HomeFeedPrompt.build(snapshot: snapshot)
+            let (system, user) = HomeFeedPrompt.build(
+                snapshot: snapshot,
+                customInstructions: profiles.customInstructions)
             let text = try await client.complete(system: system, user: user)
             let parsed = try HomeFeedParser.parse(text, validAlbumIds: Set(keysById.keys))
             let resolved = Self.resolve(parsed, keysById: keysById)

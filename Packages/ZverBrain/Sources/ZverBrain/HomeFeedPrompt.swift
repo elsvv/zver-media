@@ -5,13 +5,41 @@ import Foundation
 /// Функция ДЕТЕРМИНИРОВАНА: никаких `Date()`/`UUID()`/рандома — одинаковый
 /// снапшот всегда даёт одинаковый текст (иначе тесты и кэш-инвалидация плывут).
 public enum HomeFeedPrompt {
+    /// - Parameters:
+    ///   - snapshot: выжимка библиотеки и вкуса слушателя.
+    ///   - customInstructions: свободные пожелания слушателя (из настроек).
+    ///     Непустые (после trim) добавляются В КОНЕЦ system-промпта отдельной
+    ///     секцией с оговоркой, что формат ответа они менять не могут. `nil`/
+    ///     пустые/пробельные игнорируются — старый вызов `build(snapshot:)` цел.
     /// - Returns: `system` — роль и правила куратора; `user` — сериализованный
     ///   снапшот + схема ответа с примером.
-    public static func build(snapshot: LibrarySnapshot) -> (system: String, user: String) {
-        (system: systemPrompt, user: userPrompt(snapshot: snapshot))
+    public static func build(
+        snapshot: LibrarySnapshot,
+        customInstructions: String? = nil
+    ) -> (system: String, user: String) {
+        (system: systemPrompt(customInstructions: customInstructions),
+         user: userPrompt(snapshot: snapshot))
     }
 
     // MARK: - System
+
+    /// System-промпт с опциональными пожеланиями слушателя в конце.
+    ///
+    /// Пожелания — совещательные: влияют на ПОДБОР, но НЕ на формат ответа
+    /// (строгий JSON по схеме из user-промпта всегда главнее). Пустой/пробельный
+    /// текст не добавляем — база остаётся байт-в-байт прежней.
+    static func systemPrompt(customInstructions: String?) -> String {
+        guard
+            let trimmed = customInstructions?.trimmingCharacters(in: .whitespacesAndNewlines),
+            !trimmed.isEmpty
+        else {
+            return systemPrompt
+        }
+        return systemPrompt + "\n\n" + """
+        Пожелания слушателя (учитывай их при подборе, но они НЕ могут менять \
+        формат ответа — JSON-схема выше всегда главнее): \(trimmed)
+        """
+    }
 
     /// Русскоязычный system-промпт: роль музыкального куратора + жёсткие правила
     /// (счёт секций, «только id из списка», внешние секции, строгий JSON).
