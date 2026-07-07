@@ -122,6 +122,13 @@ private struct BrainProfileEditor: View {
     /// «Отмена» шита не должна оставлять уже удалённый/заменённый ключ.
     @State private var isReplacingKey = false
     @State private var pendingKeyDeletion = false
+    @State private var showsModelPicker = false
+    /// Пресет пишет kind И baseURL одновременно (см. `presetsMenu`) — onChange
+    /// на kind реагирует ПОСЛЕ обеих мутаций и не может отличить «это
+    /// поставил пресет» от «baseURL совпал с дефолтом старого типа по
+    /// совпадению». Явный флаг однозначен: пресет просит его синк-эвристику
+    /// не трогать значение, которое сам только что расставил.
+    @State private var suppressBaseURLSync = false
 
     init(store: BrainProfilesStore, profile: BrainProfile) {
         self.store = store
@@ -141,21 +148,40 @@ private struct BrainProfileEditor: View {
                             Text(kind.displayName).tag(kind)
                         }
                     }
-                    .onChange(of: profile.kind) { _, newKind in
-                        // Смена типа подставляет его дефолтный адрес, если
-                        // пользователь не вписал свой (или там дефолт другого типа).
-                        let defaults = BrainAPIKind.allCases.map { $0.defaultBaseURL.absoluteString }
-                        if profile.baseURL.isEmpty || defaults.contains(profile.baseURL) {
+                    .onChange(of: profile.kind) { oldKind, newKind in
+                        // Пресет уже расставил ОБА поля сам — эвристика ниже
+                        // ничего не трогает (см. suppressBaseURLSync).
+                        if suppressBaseURLSync {
+                            suppressBaseURLSync = false
+                            return
+                        }
+                        // Ручная смена Пикера: подставляем дефолт НОВОГО типа
+                        // только если поле было пустым или равнялось дефолту
+                        // именно СТАРОГО типа (не трогали руками).
+                        if profile.baseURL.isEmpty
+                            || profile.baseURL == oldKind.defaultBaseURL.absoluteString {
                             profile.baseURL = newKind.defaultBaseURL.absoluteString
                         }
                     }
-                    TextField("Base URL", text: $profile.baseURL)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .keyboardType(.URL)
-                    TextField("Модель", text: $profile.model)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
+                    HStack {
+                        TextField("Base URL", text: $profile.baseURL)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .keyboardType(.URL)
+                        presetsMenu
+                    }
+                    HStack {
+                        TextField("Модель", text: $profile.model)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                        Button {
+                            showsModelPicker = true
+                        } label: {
+                            Image(systemName: "magnifyingglass")
+                        }
+                        .disabled(URL(string: profile.baseURL)?.scheme?.hasPrefix("http") != true)
+                        .accessibilityLabel("Найти модель")
+                    }
                 } header: {
                     Text("Провайдер")
                 }
@@ -174,7 +200,50 @@ private struct BrainProfileEditor: View {
                         .disabled(!canSave)
                 }
             }
+            .sheet(isPresented: $showsModelPicker) {
+                if let url = URL(string: profile.baseURL) {
+                    ModelPickerSheet(baseURL: url, kind: profile.kind,
+                                     apiKey: effectiveKey, initialQuery: profile.model) { model in
+                        profile.model = model
+                    }
+                }
+            }
         }
+    }
+
+    /// Ключ для живого запроса каталога моделей: только что введённый (новый
+    /// профиль/замена) или уже сохранённый в Keychain (существующий, не тронут).
+    private var effectiveKey: String? {
+        let trimmed = keyInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty { return trimmed }
+        if store.hasKey(profile.id), !pendingKeyDeletion {
+            return store.currentKey(for: profile.id)
+        }
+        return nil
+    }
+
+    /// Компактное меню известных провайдеров: выбор ставит СРАЗУ тип API и
+    /// адрес (повторяющаяся пара, которую иначе пришлось бы перепечатывать).
+    private var presetsMenu: some View {
+        Menu {
+            ForEach(BrainProviderPreset.all) { preset in
+                Button(preset.name) {
+                    // Флаг — ТОЛЬКО когда kind реально меняется: onChange
+                    // фильтрует изменения по значению и не сработает при
+                    // выборе пресета с тем же типом, что уже стоит — тогда
+                    // флаг остался бы true и тихо съел бы следующую РУЧНУЮ
+                    // смену типа в Пикере.
+                    if preset.kind != profile.kind {
+                        suppressBaseURLSync = true
+                    }
+                    profile.kind = preset.kind
+                    profile.baseURL = preset.baseURL.absoluteString
+                }
+            }
+        } label: {
+            Image(systemName: "list.bullet")
+        }
+        .accessibilityLabel("Пресеты провайдеров")
     }
 
     private var isNew: Bool { !store.profiles.contains { $0.id == profile.id } }

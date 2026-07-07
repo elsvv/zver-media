@@ -147,6 +147,12 @@ final class BrainProfilesStore: ObservableObject {
         return "…\(token.suffix(4))"
     }
 
+    /// Значение ключа для ЭФЕМЕРНОГО использования (живой запрос каталога
+    /// моделей к провайдеру самого профиля) — не для отображения/логов.
+    func currentKey(for id: UUID) -> String? {
+        keyStore.token(forService: Self.service(for: id))
+    }
+
     enum AccountError: Error { case emptyToken }
 
     // MARK: - Персист и миграция
