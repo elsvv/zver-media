@@ -38,6 +38,8 @@ public enum RemotePayload: Equatable, Sendable {
     case requestLibrary
     case requestAlbumTracks(albumId: String)
     case playAlbum(albumId: String, startIndex: Int)
+    case startImport                                // запустить импорт с ЭТОГО Мака
+    case requestArtwork(albumId: String)            // обложка альбома для грида/now-playing
 
     // MARK: iPhone → Mac (ответы/пуш)
     case paired(token: String)                      // ответ на pair при верном коде
@@ -45,6 +47,8 @@ public enum RemotePayload: Equatable, Sendable {
     case state(RemotePlayerState)                   // пуш при изменении
     case library(RemoteLibrary)                     // на коннект и при изменении каталога
     case albumTracks(albumId: String, tracks: [RemoteTrack])
+    case artwork(albumId: String, data: Data)       // JPEG-обложка (Data → base64 в JSON)
+    case importStatus(RemoteImportStatus)           // пуш прогресса импорта
     case error(message: String)
 
     /// Forward-compat: неизвестный будущей версии `type`. Несёт прочитанный тег,
@@ -56,15 +60,15 @@ extension RemotePayload: Codable {
     /// Стабильные строковые теги вариантов (значение поля `type`).
     enum Tag: String {
         case pair, hello, play, pause, togglePlayPause, next, previous, seek
-        case requestLibrary, requestAlbumTracks, playAlbum
-        case paired, helloAck, state, library, albumTracks, error
+        case requestLibrary, requestAlbumTracks, playAlbum, startImport, requestArtwork
+        case paired, helloAck, state, library, albumTracks, artwork, importStatus, error
     }
 
     private enum CodingKeys: String, CodingKey {
         case type
         case code, token, seconds, albumId, startIndex
         case ok, protocolVersion, message
-        case state, library, tracks
+        case state, library, tracks, data, status
     }
 
     public init(from decoder: any Decoder) throws {
@@ -101,6 +105,10 @@ extension RemotePayload: Codable {
                 albumId: try container.decode(String.self, forKey: .albumId),
                 startIndex: try container.decode(Int.self, forKey: .startIndex)
             )
+        case .startImport:
+            self = .startImport
+        case .requestArtwork:
+            self = .requestArtwork(albumId: try container.decode(String.self, forKey: .albumId))
         case .paired:
             self = .paired(token: try container.decode(String.self, forKey: .token))
         case .helloAck:
@@ -117,6 +125,13 @@ extension RemotePayload: Codable {
                 albumId: try container.decode(String.self, forKey: .albumId),
                 tracks: try container.decode([RemoteTrack].self, forKey: .tracks)
             )
+        case .artwork:
+            self = .artwork(
+                albumId: try container.decode(String.self, forKey: .albumId),
+                data: try container.decode(Data.self, forKey: .data)
+            )
+        case .importStatus:
+            self = .importStatus(try container.decode(RemoteImportStatus.self, forKey: .status))
         case .error:
             self = .error(message: try container.decode(String.self, forKey: .message))
         }
@@ -153,6 +168,11 @@ extension RemotePayload: Codable {
             try container.encode(Tag.playAlbum.rawValue, forKey: .type)
             try container.encode(albumId, forKey: .albumId)
             try container.encode(startIndex, forKey: .startIndex)
+        case .startImport:
+            try container.encode(Tag.startImport.rawValue, forKey: .type)
+        case let .requestArtwork(albumId):
+            try container.encode(Tag.requestArtwork.rawValue, forKey: .type)
+            try container.encode(albumId, forKey: .albumId)
         case let .paired(token):
             try container.encode(Tag.paired.rawValue, forKey: .type)
             try container.encode(token, forKey: .token)
@@ -170,6 +190,13 @@ extension RemotePayload: Codable {
             try container.encode(Tag.albumTracks.rawValue, forKey: .type)
             try container.encode(albumId, forKey: .albumId)
             try container.encode(tracks, forKey: .tracks)
+        case let .artwork(albumId, data):
+            try container.encode(Tag.artwork.rawValue, forKey: .type)
+            try container.encode(albumId, forKey: .albumId)
+            try container.encode(data, forKey: .data)
+        case let .importStatus(status):
+            try container.encode(Tag.importStatus.rawValue, forKey: .type)
+            try container.encode(status, forKey: .status)
         case let .error(message):
             try container.encode(Tag.error.rawValue, forKey: .type)
             try container.encode(message, forKey: .message)

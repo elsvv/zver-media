@@ -41,6 +41,15 @@ final class RemoteControlService: ObservableObject {
     private weak var player: PlayerEngine?
     private weak var library: LibraryStore?
 
+    /// Headless-импорт по команде Мака (`startImport`). Прокидывается из
+    /// ContentView; его `$status` пушится всем авторизованным как
+    /// `importStatus` — прогресс синка виден на Маке. nil → команда
+    /// игнорируется (фича не подключена).
+    var importLauncher: RemoteImportLauncher? {
+        didSet { observeImportLauncher() }
+    }
+    private var importCancellable: AnyCancellable?
+
     /// Имя Bonjour-сервиса (имя iPhone). Фоллбэк — «Zver iPhone».
     private let serviceName: String
 
@@ -220,12 +229,47 @@ final class RemoteControlService: ObservableObject {
             )
         case let .playAlbum(albumId, startIndex):
             handlePlayAlbum(albumId: albumId, startIndex: startIndex)
+        case .startImport:
+            // Запуск синка с Мака без конфирма на телефоне: Мак авторизован в
+            // канале пульта (спарен) — доверие уже установлено. Повторная
+            // команда при идущем импорте — no-op в лаунчере.
+            importLauncher?.start()
+        case let .requestArtwork(albumId):
+            handleRequestArtwork(albumId: albumId, clientId: id)
         // Ответные/пуш-варианты, hello/pair (уже авторизованы) и unknown —
         // от Мака не ожидаются: молча игнорируем (forward-compat).
         case .pair, .hello, .paired, .helloAck, .state, .library, .albumTracks,
-             .error, .unknown:
+             .artwork, .importStatus, .error, .unknown:
             break
         }
+    }
+
+    /// Обложка альбома для Мака: грузим через общий `ArtworkLoader` плеера,
+    /// даунскейлим до 600px и жмём в JPEG вне главного потока, шлём адресно.
+    /// Нет обложки/альбома — молча ничего (Мак останется с плейсхолдером).
+    private func handleRequestArtwork(albumId: String, clientId id: RemoteClientID) {
+        guard let library, let player else { return }
+        guard let group = RemoteLibraryBuilder.group(withId: albumId, in: library.albums),
+              let track = group.tracks.first else { return }
+        let loader = player.artworkLoader
+        let server = self.server
+        Task { @MainActor in
+            guard let image = await loader.artwork(for: track) else { return }
+            let jpeg = await Task.detached(priority: .utility) {
+                RemoteArtworkEncoder.jpeg(from: image, maxSide: 600)
+            }.value
+            guard let jpeg else { return }
+            server.send(RemoteMessage(payload: .artwork(albumId: albumId, data: jpeg)), to: id)
+        }
+    }
+
+    /// Пуш прогресса headless-импорта всем авторизованным Макам.
+    private func observeImportLauncher() {
+        importCancellable = importLauncher?.$status
+            .dropFirst() // стартовый idle не шумит в канал
+            .sink { [weak self] status in
+                self?.broadcastToAuthorized(RemoteMessage(payload: .importStatus(status)))
+            }
     }
 
     private func handlePlayAlbum(albumId: String, startIndex: Int) {
