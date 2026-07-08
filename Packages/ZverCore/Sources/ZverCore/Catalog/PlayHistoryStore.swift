@@ -130,6 +130,43 @@ public final class PlayHistoryStore: Sendable {
         }
     }
 
+    /// Артисты, которых слушатель систематически скипает, — анти-сигнал для
+    /// промпта AI-ленты (блок «НЕ ЗАХОДИТ»). Считаются только БЫСТРЫЕ скипы:
+    /// `endReason == .skipped` И не пройден порог ``isListened`` (скип после
+    /// почти полного прослушивания — не отторжение). Порог `minSkips` отсекает
+    /// случайные одиночные переключения. Возвращает канонические написания,
+    /// по убыванию числа скипов (тай-брейк — имя по алфавиту).
+    public func skippedArtists(since: Date, minSkips: Int) throws -> [String] {
+        let events = try catalog.dbQueue.read { db in
+            try PlayEvent
+                .filter(Column("startedAt") >= since)
+                .filter(Column("endReason") == PlayEndReason.skipped.rawValue)
+                .fetchAll(db)
+        }
+        let quickSkips = events.filter {
+            !Self.isListened(playedSeconds: $0.playedSeconds, trackDuration: $0.trackDuration)
+        }
+
+        var order: [String] = []
+        var variants: [String: [String]] = [:]
+        var counts: [String: Int] = [:]
+        for event in quickSkips {
+            guard let key = ArtistName.key(event.artist), let raw = event.artist else { continue }
+            if counts[key] == nil { order.append(key) }
+            variants[key, default: []].append(raw)
+            counts[key, default: 0] += 1
+        }
+        return order
+            .filter { (counts[$0] ?? 0) >= minSkips }
+            .map { key in (name: ArtistName.canonical(variants[key] ?? []),
+                           count: counts[key] ?? 0) }
+            .sorted { lhs, rhs in
+                if lhs.count != rhs.count { return lhs.count > rhs.count }
+                return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+            }
+            .map(\.name)
+    }
+
     /// Агрегат прослушивания с момента `since` — только по «прослушанным»
     /// событиям. Группировка и выбор канона написания — в Swift (объёмы малы,
     /// правило `isListened` не дублируется в SQL, канон совпадает с `ArtistName`).

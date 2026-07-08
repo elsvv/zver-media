@@ -49,6 +49,7 @@ public enum HomeFeedParser {
                     subtitle: section.subtitle,
                     tags: section.tags,
                     kind: .albums,
+                    category: section.category,
                     albumIds: valid,
                     items: nil
                 )
@@ -62,6 +63,8 @@ public enum HomeFeedParser {
                     subtitle: section.subtitle,
                     tags: section.tags,
                     kind: .external,
+                    // Эхо категории терпимо к отсутствию: нет слага — секция без него.
+                    category: section.category,
                     albumIds: nil,
                     items: items
                 )

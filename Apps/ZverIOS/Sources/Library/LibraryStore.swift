@@ -26,10 +26,11 @@ final class LibraryStore: ObservableObject {
 
     private let catalogStore: CatalogStore
     private let playlistStore: PlaylistStore
-    /// Сторы избранного и истории (та же БД каталога). nil — фичи выключены
-    /// (тесты/превью со старым инитом).
+    /// Сторы избранного, истории и памяти рекомендаций (та же БД каталога).
+    /// nil — фичи выключены (тесты/превью со старым инитом).
     private let favoriteStore: FavoriteStore?
     private let historyStore: PlayHistoryStore?
+    private let recommendationStore: RecommendationStore?
     private let documentsURL: URL
 
     /// Сервис облачного бэкапа (этап 4). Прокидывается извне после инициализации
@@ -47,11 +48,13 @@ final class LibraryStore: ObservableObject {
     init(catalogStore: CatalogStore, playlistStore: PlaylistStore,
          favoriteStore: FavoriteStore? = nil,
          historyStore: PlayHistoryStore? = nil,
+         recommendationStore: RecommendationStore? = nil,
          documentsURL: URL = .documentsDirectory) {
         self.catalogStore = catalogStore
         self.playlistStore = playlistStore
         self.favoriteStore = favoriteStore
         self.historyStore = historyStore
+        self.recommendationStore = recommendationStore
         self.documentsURL = documentsURL
     }
 
@@ -473,6 +476,82 @@ final class LibraryStore: ObservableObject {
         guard let historyStore else { return nil }
         return await Task.detached(priority: .userInitiated) {
             try? historyStore.listeningStats(since: since)
+        }.value
+    }
+
+    /// Систематически скипаемые артисты (анти-сигнал промпта AI-ленты).
+    func skippedArtists(since: Date, minSkips: Int) async -> [String] {
+        guard let historyStore else { return [] }
+        return await Task.detached(priority: .userInitiated) {
+            (try? historyStore.skippedArtists(since: since, minSkips: minSkips)) ?? []
+        }.value
+    }
+
+    // MARK: - Память рекомендаций (Предложка v2)
+
+    /// Срез фидбека по рекомендациям для промпта (♥ / «не моё» / показанное).
+    func recommendationFeedback(likedLimit: Int, hiddenLimit: Int,
+                                shownWindow: Date) async -> RecFeedback? {
+        guard let recommendationStore else { return nil }
+        return await Task.detached(priority: .userInitiated) {
+            try? recommendationStore.feedback(likedLimit: likedLimit,
+                                              hiddenLimit: hiddenLimit,
+                                              shownWindow: shownWindow)
+        }.value
+    }
+
+    /// Ключи показанного с `since` (для дедупа ленты); `excluding` вычитает
+    /// статусы (дизайн: за 90 дней кроме liked).
+    func shownRecommendationKeys(since: Date,
+                                 excluding: Set<RecommendationStatus> = []) async -> Set<String> {
+        guard let recommendationStore else { return [] }
+        return await Task.detached(priority: .userInitiated) {
+            (try? recommendationStore.shownKeys(since: since, excluding: excluding)) ?? []
+        }.value
+    }
+
+    /// Фиксирует показ прошедших валидацию рекомендаций (upsert по normKey).
+    func recordShownRecommendations(_ recs: [Recommendation]) async {
+        guard let recommendationStore, !recs.isEmpty else { return }
+        await Task.detached(priority: .utility) {
+            for rec in recs {
+                try? recommendationStore.recordShown(rec)
+            }
+        }.value
+    }
+
+    /// Фидбек по рекомендации из шита: ♥ liked / ✕ hidden / «уже есть» owned
+    /// (или откат в shown). Неизвестный ключ — no-op на стороне стора.
+    func setRecommendationStatus(normKey: String, status: RecommendationStatus) async {
+        guard let recommendationStore else { return }
+        await Task.detached(priority: .userInitiated) {
+            try? recommendationStore.setStatus(normKey: normKey, status: status)
+        }.value
+    }
+
+    /// Кэшированный JSON точных ссылок Odesli (или nil — кэша нет):
+    /// повторное открытие шита рекомендации не ходит в сеть.
+    func cachedRecommendationLinks(normKey: String) async -> String? {
+        guard let recommendationStore else { return nil }
+        return await Task.detached(priority: .userInitiated) {
+            try? recommendationStore.cachedLinks(normKey: normKey)
+        }.value ?? nil
+    }
+
+    /// Кэширует JSON точных ссылок Odesli (по тапу в шите). Неизвестный
+    /// ключ — no-op на стороне стора (старый кэш ленты без памяти показа).
+    func cacheRecommendationLinks(normKey: String, json: String) async {
+        guard let recommendationStore else { return }
+        await Task.detached(priority: .utility) {
+            try? recommendationStore.cacheLinks(normKey: normKey, json: json)
+        }.value
+    }
+
+    /// Ключи понравившихся рекомендаций — ♥-бейджи карточек ленты.
+    func likedRecommendationKeys() async -> Set<String> {
+        guard let recommendationStore else { return [] }
+        return await Task.detached(priority: .userInitiated) {
+            (try? recommendationStore.keys(withStatus: .liked)) ?? []
         }.value
     }
 

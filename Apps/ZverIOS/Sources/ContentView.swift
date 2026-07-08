@@ -39,7 +39,8 @@ struct ContentView: View {
             catalogStore: catalogStore,
             playlistStore: PlaylistStore(catalog: catalog),
             favoriteStore: FavoriteStore(catalog: catalog),
-            historyStore: PlayHistoryStore(catalog: catalog)
+            historyStore: PlayHistoryStore(catalog: catalog),
+            recommendationStore: RecommendationStore(catalog: catalog)
         )
         let backup = BackupService(
             catalogStore: catalogStore,
