@@ -192,6 +192,35 @@ public final class Catalog: Sendable {
                           columns: ["startedAt"])
         }
 
+        // v7: память AI-рекомендаций («Предложка v2»). Аддитивна — одна новая
+        // таблица, `track` не трогаем. СОЗНАТЕЛЬНО без FK (как favorite/playEvent):
+        // рекомендация — внешний релиз, его нет в каталоге, и память переживает
+        // любые изменения библиотеки. UNIQUE по normKey (`ReleaseNorm.key`) —
+        // один релиз = одна строка; повторный показ upsert-ит shownAt
+        // (см. `RecommendationStore.recordShown`).
+        migrator.registerMigration("v7") { db in
+            try db.create(table: "recommendation") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("artist", .text).notNull()
+                t.column("album", .text).notNull()
+                t.column("normKey", .text).notNull().unique()
+                t.column("year", .integer)
+                t.column("category", .text)          // слаг DiscoveryCategory
+                t.column("reason", .text)
+                t.column("status", .text).notNull()  // 'shown'|'liked'|'hidden'|'owned'
+                t.column("genre", .text)
+                t.column("appleMusicURL", .text)
+                t.column("artworkURL", .text)
+                t.column("itunesId", .integer)
+                t.column("links", .text)             // JSON-кэш Odesli
+                t.column("shownAt", .datetime).notNull()
+                t.column("updatedAt", .datetime).notNull()
+            }
+            // Выборки «показанного недавно» идут по времени — индекс на shownAt.
+            try db.create(index: "recommendation_shownAt", on: "recommendation",
+                          columns: ["shownAt"])
+        }
+
         return migrator
     }
 }

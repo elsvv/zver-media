@@ -14,6 +14,8 @@ packages:
     path: ../../Packages/ZverStorage
   ZverBrain:
     path: ../../Packages/ZverBrain
+  ZverImport:
+    path: ../../Packages/ZverImport
 targets:
   ZverIOS:
     type: application
@@ -25,6 +27,7 @@ targets:
       - package: ZverTransport
       - package: ZverStorage
       - package: ZverBrain
+      - package: ZverImport
     settings:
       base:
         SWIFT_VERSION: "6.0"
@@ -46,6 +49,27 @@ targets:
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         NSLocalNetworkUsageDescription: "Zver ищет ваш Mac в локальной сети, чтобы импортировать с него альбомы."
         NSBonjourServices: [_zver._tcp]
+        # «Открыть в Zver Media» из Safari/Files/AirDrop/почты. Rank Alternate —
+        # мы не «владелец» этих типов, просто принимаем zip-архивы Bandcamp и
+        # одиночные аудиофайлы. `.dsf` iOS не знает — объявляем импортируемый тип.
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: Музыка и архивы
+            CFBundleTypeRole: Viewer
+            LSHandlerRank: Alternate
+            LSItemContentTypes:
+              - public.zip-archive
+              - public.audio
+              - org.xiph.flac
+              - com.sony.dsf
+        UTImportedTypeDeclarations:
+          - UTTypeIdentifier: com.sony.dsf
+            UTTypeDescription: DSD Stream File
+            UTTypeConformsTo:
+              - public.audio
+              - public.data
+            UTTypeTagSpecification:
+              public.filename-extension: [dsf]
+              public.mime-type: [audio/x-dsf]
   ZverIOSUITests:
     type: bundle.ui-testing
     platform: iOS

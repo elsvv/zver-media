@@ -191,4 +191,66 @@ import Testing
         #expect(stats.artists.isEmpty)
         #expect(stats.albums.isEmpty)
     }
+
+    // MARK: - skippedArtists (анти-сигнал промпта AI-ленты)
+
+    /// Быстрый скип: переключил, не дослушав (не проходит порог isListened).
+    private func skip(_ trackKey: String, artist: String,
+                      at seconds: TimeInterval) -> PlayEvent {
+        event(trackKey, artist: artist, at: seconds, played: 5, duration: 200,
+              endReason: .skipped)
+    }
+
+    @Test func skippedArtistsRequiresMinSkips() throws {
+        let store = try makeStore()
+        try store.record(skip("b1", artist: "Боб", at: 1_000))
+        try store.record(skip("b2", artist: "Боб", at: 2_000))
+        try store.record(skip("a1", artist: "Аня", at: 3_000))
+
+        let skipped = try store.skippedArtists(
+            since: Date(timeIntervalSince1970: 0), minSkips: 2)
+
+        #expect(skipped == ["Боб"])   // Аня — один скип, не «систематически»
+    }
+
+    @Test func skippedArtistsIgnoresListenedSkips() throws {
+        // Скип после почти полного прослушивания — не анти-сигнал.
+        let store = try makeStore()
+        for i in 0..<3 {
+            try store.record(event("l\(i)", artist: "Люба",
+                                   at: TimeInterval(1_000 + i),
+                                   played: 190, duration: 200, endReason: .skipped))
+        }
+
+        let skipped = try store.skippedArtists(
+            since: Date(timeIntervalSince1970: 0), minSkips: 2)
+
+        #expect(skipped.isEmpty)
+    }
+
+    @Test func skippedArtistsRespectsSinceWindow() throws {
+        let store = try makeStore()
+        try store.record(skip("o1", artist: "Оля", at: 1_000))
+        try store.record(skip("o2", artist: "Оля", at: 2_000))
+
+        let skipped = try store.skippedArtists(
+            since: Date(timeIntervalSince1970: 5_000), minSkips: 2)
+
+        #expect(skipped.isEmpty)
+    }
+
+    @Test func skippedArtistsMergesSpellingVariantsAndSortsByCount() throws {
+        let store = try makeStore()
+        // Разный регистр — один артист (ArtistName.key), канон — частое написание.
+        try store.record(skip("s1", artist: "the cure", at: 1_000))
+        try store.record(skip("s2", artist: "The Cure", at: 2_000))
+        try store.record(skip("s3", artist: "The Cure", at: 3_000))
+        try store.record(skip("m1", artist: "Muse", at: 4_000))
+        try store.record(skip("m2", artist: "Muse", at: 5_000))
+
+        let skipped = try store.skippedArtists(
+            since: Date(timeIntervalSince1970: 0), minSkips: 2)
+
+        #expect(skipped == ["The Cure", "Muse"])   // 3 скипа > 2
+    }
 }

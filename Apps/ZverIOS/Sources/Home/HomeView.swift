@@ -1,4 +1,5 @@
 import SwiftUI
+import ZverBrain
 import ZverCore
 
 /// Таб «Главная»: лента в духе Apple Music. Сверху — локальное «Недавно
@@ -10,6 +11,10 @@ struct HomeView: View {
     @ObservedObject var engine: PlayerEngine
     @ObservedObject var feedService: HomeFeedService
     @ObservedObject var profiles: BrainProfilesStore
+    /// Мост «Найти на Bandcamp» (шит рекомендации): передаёт поисковый URL
+    /// наверх — `ContentView` кладёт его в `ImportRouter` и переключает таб
+    /// на «Импорт».
+    let findOnBandcamp: @MainActor (URL) -> Void
 
     @State private var recentlyPlayed: [AlbumGroup] = []
     @State private var confirmsRefresh = false
@@ -57,7 +62,8 @@ struct HomeView: View {
             Text("Статистика прослушивания уйдёт выбранной модели, это потратит токены API.")
         }
         .sheet(item: $selectedSuggestion) { suggestion in
-            ExternalSuggestionSheet(suggestion: suggestion)
+            ExternalSuggestionSheet(suggestion: suggestion, feedService: feedService,
+                                    findOnBandcamp: findOnBandcamp)
         }
     }
 
@@ -75,10 +81,10 @@ struct HomeView: View {
             }
         } else {
             switch feedService.state {
-            case .loading:
+            case .loading, .validating:
                 VStack(spacing: 10) {
                     ProgressView()
-                    Text("Модель собирает ленту…")
+                    Text(progressLabel)
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
@@ -112,15 +118,24 @@ struct HomeView: View {
         }
     }
 
-    /// Инлайн-статус над живой лентой: спиннер во время генерации, ошибка —
-    /// баннером (старая лента остаётся рабочей).
+    /// Текст фазы генерации: сборка у модели или валидация кандидатов
+    /// через iTunes с прогрессом N/M.
+    private var progressLabel: String {
+        if case .validating(let done, let total) = feedService.state {
+            return "Проверяю рекомендации… \(done)/\(total)"
+        }
+        return "Модель собирает ленту…"
+    }
+
+    /// Инлайн-статус над живой лентой: спиннер во время генерации/валидации,
+    /// ошибка — баннером (старая лента остаётся рабочей).
     @ViewBuilder
     private var statusBanner: some View {
         switch feedService.state {
-        case .loading:
+        case .loading, .validating:
             HStack(spacing: 10) {
                 ProgressView()
-                Text("Модель собирает новую ленту…")
+                Text(progressLabel)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
@@ -205,7 +220,8 @@ struct HomeView: View {
                         Button {
                             selectedSuggestion = suggestion
                         } label: {
-                            ExternalSuggestionCard(suggestion: suggestion)
+                            ExternalSuggestionCard(suggestion: suggestion,
+                                                   liked: feedService.isLiked(suggestion))
                                 .frame(width: 150)
                         }
                         .buttonStyle(.plain)
@@ -225,7 +241,7 @@ struct HomeView: View {
                 } label: {
                     Label("Обновить рекомендации", systemImage: "sparkles")
                 }
-                .disabled(feedService.state == .loading)
+                .disabled(feedService.state.isBusy)
             } label: {
                 Image(systemName: "ellipsis.circle")
             }
@@ -234,9 +250,11 @@ struct HomeView: View {
 }
 
 /// Карточка внешней рекомендации: обложка из iTunes (пока грузится/не нашлась —
-/// шейдерная заглушка с артистом), название + артист под ней.
+/// шейдерная заглушка с артистом), название + артист под ней. Поверх обложки —
+/// бейдж жанра (из валидации) и ♥, если рекомендация понравилась.
 struct ExternalSuggestionCard: View {
     let suggestion: ExternalSuggestion
+    let liked: Bool
 
     @State private var artwork: UIImage?
 
@@ -261,6 +279,28 @@ struct ExternalSuggestionCard: View {
                     .background(.black.opacity(0.35), in: Circle())
                     .padding(6)
             }
+            .overlay(alignment: .topLeading) {
+                if liked {
+                    Image(systemName: "heart.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.pink)
+                        .padding(4)
+                        .background(.black.opacity(0.35), in: Circle())
+                        .padding(6)
+                }
+            }
+            .overlay(alignment: .bottomLeading) {
+                if let genre = suggestion.genre {
+                    Text(genre)
+                        .font(.caption2.weight(.medium))
+                        .lineLimit(1)
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(.black.opacity(0.35), in: Capsule())
+                        .padding(6)
+                }
+            }
             Text(suggestion.album)
                 .font(.callout)
                 .foregroundStyle(.primary)
@@ -271,18 +311,41 @@ struct ExternalSuggestionCard: View {
                 .lineLimit(1)
         }
         .task(id: suggestion.id) {
-            artwork = await ITunesArtworkFetcher.shared.artwork(
-                artist: suggestion.artist, album: suggestion.album)
+            artwork = await ITunesCatalog.shared.artwork(for: suggestion)
         }
     }
 }
 
-/// Шит внешней рекомендации: крупная обложка, метадата и reason —
-/// «почему тебе зайдёт» от модели.
+extension ITunesCatalog {
+    /// Обложка рекомендации: по готовому `artworkURL` из валидации (быстро,
+    /// без второго похода в поиск); старый кэш ленты без него — через резолв.
+    func artwork(for suggestion: ExternalSuggestion) async -> UIImage? {
+        if let urlString = suggestion.artworkURL {
+            return await artwork(urlString: urlString)
+        }
+        return await artwork(artist: suggestion.artist, album: suggestion.album)
+    }
+}
+
+/// Шит внешней рекомендации v2: крупная обложка, метадата (жанр/год), reason
+/// «почему тебе зайдёт», кнопки «Открыть в…» (Apple Music — прямой ссылкой из
+/// валидации, остальные — мгновенным поиском) и фидбек ♥ / ✕ / «уже есть».
 struct ExternalSuggestionSheet: View {
     let suggestion: ExternalSuggestion
+    @ObservedObject var feedService: HomeFeedService
+    /// Мост к импорту: поисковый URL Bandcamp уходит наверх (`ContentView` →
+    /// `ImportRouter`), шит закрывается, открывается вкладка «Импорт».
+    let findOnBandcamp: @MainActor (URL) -> Void
 
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.openURL) private var openURL
     @State private var artwork: UIImage?
+    /// Точные ссылки Odesli (этап 2): подъезжают асинхронно после открытия
+    /// (кэш — мгновенно, сеть — один запрос с таймаутом); пока их нет,
+    /// кнопки работают поисковыми URL — шит никогда не ждёт сеть.
+    @State private var songLinks: SongLinks?
+
+    private var liked: Bool { feedService.isLiked(suggestion) }
 
     var body: some View {
         ScrollView {
@@ -304,10 +367,14 @@ struct ExternalSuggestionSheet: View {
                     Text(suggestion.album)
                         .font(.title2.weight(.bold))
                         .multilineTextAlignment(.center)
-                    Text(suggestion.year.map { "\(suggestion.artist) • \($0)" }
-                         ?? suggestion.artist)
+                    Text(suggestion.artist)
                         .font(.body.weight(.medium))
                         .foregroundStyle(.secondary)
+                    if let meta = metaLine {
+                        Text(meta)
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    }
                 }
 
                 Text(suggestion.reason)
@@ -315,6 +382,10 @@ struct ExternalSuggestionSheet: View {
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 4)
+
+                feedbackRow
+                openInSection
+                bandcampBridgeButton
 
                 Label("Найди и закинь через Mac-синк — появится в библиотеке",
                       systemImage: "laptopcomputer.and.arrow.down")
@@ -325,8 +396,140 @@ struct ExternalSuggestionSheet: View {
         }
         .presentationDetents([.medium, .large])
         .task(id: suggestion.id) {
-            artwork = await ITunesArtworkFetcher.shared.artwork(
-                artist: suggestion.artist, album: suggestion.album)
+            async let art = ITunesCatalog.shared.artwork(for: suggestion)
+            async let links = feedService.songLinks(for: suggestion)
+            artwork = await art
+            songLinks = await links
         }
+    }
+
+    /// «Жанр • Год» из валидации; чего нет — не показываем.
+    private var metaLine: String? {
+        let parts = [suggestion.genre, suggestion.year.map(String.init)]
+            .compactMap { $0 }
+        return parts.isEmpty ? nil : parts.joined(separator: " • ")
+    }
+
+    // MARK: - Фидбек
+
+    /// ♥ «Нравится» (повторный тап снимает), ✕ «Не моё» (карточка уходит из
+    /// ленты, анти-сигнал в промпт), «У меня уже есть» (страховка дедупа).
+    private var feedbackRow: some View {
+        VStack(spacing: 10) {
+            HStack(spacing: 10) {
+                Button {
+                    Task {
+                        await feedService.applyFeedback(
+                            suggestion, status: liked ? .shown : .liked)
+                    }
+                } label: {
+                    Label("Нравится", systemImage: liked ? "heart.fill" : "heart")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(liked ? .pink : .accentColor)
+
+                Button {
+                    Task {
+                        await feedService.applyFeedback(suggestion, status: .hidden)
+                        dismiss()
+                    }
+                } label: {
+                    Label("Не моё", systemImage: "xmark")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+            }
+
+            Button {
+                Task {
+                    await feedService.applyFeedback(suggestion, status: .owned)
+                    dismiss()
+                }
+            } label: {
+                Label("У меня уже есть", systemImage: "checkmark.circle")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+        }
+    }
+
+    // MARK: - «Открыть в…»
+
+    /// Apple Music — прямой `collectionViewUrl` (есть только у прошедших
+    /// валидацию); Яндекс.Музыка / Bandcamp — точные ссылки Odesli, когда
+    /// подъехали (иконка меняется на link), иначе поисковые URL
+    /// (`ExternalLinks`, без сети и ключей); YouTube — всегда поиск.
+    /// Tidal/Deezer — бонусные кнопки, только с точной ссылкой.
+    private var openInSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Открыть в…")
+                .font(.headline)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())],
+                      spacing: 8) {
+                if let appleMusic = suggestion.appleMusicURL
+                    .flatMap(URL.init(string:)) {
+                    openButton("Apple Music", systemImage: "applelogo",
+                               url: appleMusic)
+                }
+                linkedButton("Яндекс.Музыка", exact: songLinks?.yandex,
+                             search: ExternalLinks.yandexMusic(artist: suggestion.artist,
+                                                               album: suggestion.album))
+                linkedButton("Bandcamp", exact: songLinks?.bandcamp,
+                             search: ExternalLinks.bandcamp(artist: suggestion.artist,
+                                                            album: suggestion.album))
+                openButton("YouTube", systemImage: "magnifyingglass",
+                           url: ExternalLinks.youtube(artist: suggestion.artist,
+                                                      album: suggestion.album))
+                if let tidal = songLinks?.tidal.flatMap(URL.init(string:)) {
+                    openButton("Tidal", systemImage: "link", url: tidal)
+                }
+                if let deezer = songLinks?.deezer.flatMap(URL.init(string:)) {
+                    openButton("Deezer", systemImage: "link", url: deezer)
+                }
+            }
+        }
+    }
+
+    /// Кнопка площадки с апгрейдом: точная ссылка Odesli (иконка link),
+    /// пока её нет — поисковый URL (иконка лупы). Кривая точная ссылка
+    /// (не URL) — тот же поисковый фоллбэк.
+    private func linkedButton(_ title: String, exact: String?,
+                              search: URL) -> some View {
+        let exactURL = exact.flatMap(URL.init(string:))
+        return openButton(title,
+                          systemImage: exactURL == nil ? "magnifyingglass" : "link",
+                          url: exactURL ?? search)
+    }
+
+    private func openButton(_ title: String, systemImage: String, url: URL) -> some View {
+        Button {
+            openURL(url)
+        } label: {
+            Label(title, systemImage: systemImage)
+                .font(.subheadline)
+                .lineLimit(1)
+                .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.bordered)
+    }
+
+    // MARK: - Мост к импорту
+
+    /// «Найти на Bandcamp»: закрывает шит, переключает на вкладку «Импорт» и
+    /// открывает встроенный Bandcamp с поисковым URL релиза (петля: рекомендация
+    /// → $0/покупка → FLAC в библиотеке → сигнал owned).
+    private var bandcampBridgeButton: some View {
+        Button {
+            findOnBandcamp(ExternalLinks.bandcamp(artist: suggestion.artist,
+                                                  album: suggestion.album))
+            dismiss()
+        } label: {
+            Label("Найти на Bandcamp", systemImage: "square.and.arrow.down")
+                .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.bordered)
     }
 }

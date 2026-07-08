@@ -1,5 +1,6 @@
 import SwiftUI
 import ZverCore
+import ZverImport
 
 struct ContentView: View {
     @StateObject private var engine: PlayerEngine
@@ -21,6 +22,24 @@ struct ContentView: View {
     // в настройках; лента генерируется вручную и кэшируется на диске.
     @StateObject private var brain: BrainProfilesStore
     @StateObject private var homeFeed: HomeFeedService
+    // Мост «Найти на Bandcamp» из шита рекомендации: URL поиска едет через
+    // роутер во вкладку «Импорт» (ImportHomeView → BandcampImportView).
+    @StateObject private var importRouter = ImportRouter()
+
+    /// Вкладки таб-бара. Selection нужен мосту «Найти на Bandcamp»: шит
+    /// рекомендации программно переключает на «Импорт».
+    private enum Tab: Hashable {
+        case home, library, search, importer, settings
+    }
+
+    @State private var selectedTab: Tab = .home
+
+    /// Плашка-баннер после системного «Открыть в Zver Media» (импорт из
+    /// Safari/Files/AirDrop). nil — баннера нет. Гаснет сам через несколько секунд
+    /// или по тапу.
+    @State private var importBanner: String?
+    /// Автогашение баннера; пересоздаётся при новом импорте (сбрасывает таймер).
+    @State private var bannerDismiss: Task<Void, Never>?
 
     init() {
         let catalog = LibraryStore.openCatalog()
@@ -31,7 +50,8 @@ struct ContentView: View {
             catalogStore: catalogStore,
             playlistStore: PlaylistStore(catalog: catalog),
             favoriteStore: FavoriteStore(catalog: catalog),
-            historyStore: PlayHistoryStore(catalog: catalog)
+            historyStore: PlayHistoryStore(catalog: catalog),
+            recommendationStore: RecommendationStore(catalog: catalog)
         )
         let backup = BackupService(
             catalogStore: catalogStore,
@@ -71,13 +91,20 @@ struct ContentView: View {
     }
 
     var body: some View {
-        TabView {
+        TabView(selection: $selectedTab) {
             NavigationStack {
                 HomeView(store: library, engine: engine,
-                         feedService: homeFeed, profiles: brain)
+                         feedService: homeFeed, profiles: brain,
+                         findOnBandcamp: { url in
+                             // Мост из шита рекомендации: URL — роутеру,
+                             // сами — на вкладку «Импорт».
+                             importRouter.pendingBandcampSearch = url
+                             selectedTab = .importer
+                         })
             }
             .safeAreaInset(edge: .bottom, spacing: 0) { miniPlayer }
             .tabItem { Label("Главная", systemImage: "house") }
+            .tag(Tab.home)
 
             NavigationStack {
                 LibraryView(store: library, engine: engine)
@@ -88,26 +115,27 @@ struct ContentView: View {
             // inset нельзя — лёг бы ПОД таб-баром.
             .safeAreaInset(edge: .bottom, spacing: 0) { miniPlayer }
             .tabItem { Label("Библиотека", systemImage: "music.note.list") }
+            .tag(Tab.library)
 
             NavigationStack {
                 SearchView(store: library, engine: engine)
             }
             .safeAreaInset(edge: .bottom, spacing: 0) { miniPlayer }
             .tabItem { Label("Поиск", systemImage: "magnifyingglass") }
+            .tag(Tab.search)
 
             NavigationStack {
-                // Рескан каталога после импорта альбома: reconcile подхватит
-                // правки из sidecar и добавит новые треки в библиотеку. Затем —
-                // автобэкап новых local-треков в облако (если залогинены).
-                MacImportView(rescan: {
-                    await library.refresh()
-                    if account.isAuthorized, autoBackupNewAlbums {
-                        await backup.backupAwaitingTracks()
-                    }
-                })
+                // Селектор источников импорта (Мак / Bandcamp / IA / Из файлов).
+                // rescan — reconcile каталога после раскладки альбома (правки из
+                // sidecar + новые треки) с последующим автобэкапом; раздаётся
+                // источникам. showBanner — общая плашка-итог поверх табов.
+                ImportHomeView(rescan: { await refreshAndBackup() },
+                               showBanner: { text in showBanner(text) },
+                               router: importRouter)
             }
             .safeAreaInset(edge: .bottom, spacing: 0) { miniPlayer }
-            .tabItem { Label("Импорт", systemImage: "laptopcomputer.and.arrow.down") }
+            .tabItem { Label("Импорт", systemImage: "square.and.arrow.down") }
+            .tag(Tab.importer)
 
             NavigationStack {
                 SettingsView(account: account, store: library, backup: backup,
@@ -115,6 +143,71 @@ struct ContentView: View {
             }
             .safeAreaInset(edge: .bottom, spacing: 0) { miniPlayer }
             .tabItem { Label("Настройки", systemImage: "gearshape") }
+            .tag(Tab.settings)
+        }
+        // Системное «Открыть в Zver Media»: файл из Safari/Files/AirDrop/почты →
+        // staging-копия → AlbumImporter → баннер → рескан библиотеки.
+        .onOpenURL { url in Task { await handleOpenURL(url) } }
+        .overlay(alignment: .top) { bannerOverlay }
+        .animation(.spring(duration: 0.35), value: importBanner)
+    }
+
+    // MARK: - «Открыть в Zver Media»
+
+    /// Импортирует открытый системой файл и показывает результат баннером.
+    @MainActor
+    private func handleOpenURL(_ url: URL) async {
+        let libraryRoot = URL.documentsDirectory
+            .appendingPathComponent("Library", isDirectory: true)
+        do {
+            let results = try await OpenInImporter.importOpened(url, libraryRoot: libraryRoot)
+            await refreshAndBackup()
+            showBanner(ImportHomeView.bannerText(for: results))
+        } catch {
+            showBanner("Импорт не удался")
+        }
+    }
+
+    /// Рескан библиотеки + автобэкап новых local-треков (если залогинены и включён
+    /// тумблер). Общий пост-импортный путь для «С Мака» и «Открыть в Zver».
+    @MainActor
+    private func refreshAndBackup() async {
+        await library.refresh()
+        if account.isAuthorized, autoBackupNewAlbums {
+            await backup.backupAwaitingTracks()
+        }
+    }
+
+    @MainActor
+    private func showBanner(_ text: String) {
+        importBanner = text
+        bannerDismiss?.cancel()
+        bannerDismiss = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(4))
+            guard !Task.isCancelled else { return }
+            importBanner = nil
+        }
+    }
+
+    @ViewBuilder
+    private var bannerOverlay: some View {
+        if let importBanner {
+            HStack(spacing: 10) {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                Text(importBanner)
+                    .font(.subheadline.weight(.medium))
+                    .lineLimit(2)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .shadow(color: .black.opacity(0.12), radius: 8, y: 3)
+            .padding(.horizontal)
+            .padding(.top, 8)
+            .transition(.move(edge: .top).combined(with: .opacity))
+            .onTapGesture { self.importBanner = nil }
         }
     }
 

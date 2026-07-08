@@ -136,4 +136,80 @@ import Foundation
     @Test func extractReturnsNilWhenNoBrace() {
         #expect(HomeFeedParser.extractFirstJSONObject("no braces here") == nil)
     }
+
+    // MARK: - Category-эхо
+
+    @Test func externalSectionKeepsCategoryEcho() throws {
+        let text = #"""
+        {"sections":[
+          {"title":"Копни","kind":"external","category":"dig-deeper","items":[
+            {"artist":"X","album":"Y","year":2004,"reason":"зайдёт"}
+          ]}
+        ]}
+        """#
+        let feed = try HomeFeedParser.parse(text, validAlbumIds: valid)
+        #expect(feed.sections[0].category == "dig-deeper")
+    }
+
+    @Test func externalSectionWithoutCategorySurvives() throws {
+        // Старый ответ модели / легаси-кэш: category нет — секция живёт без слага.
+        let text = #"""
+        {"sections":[
+          {"title":"Скачать","kind":"external","items":[
+            {"artist":"X","album":"Y","year":null,"reason":"зайдёт"}
+          ]}
+        ]}
+        """#
+        let feed = try HomeFeedParser.parse(text, validAlbumIds: valid)
+        #expect(feed.sections.count == 1)
+        #expect(feed.sections[0].category == nil)
+    }
+
+    @Test func categorySurvivesAlbumIdFiltering() throws {
+        // sanitize пересобирает секции — слаг не должен теряться по дороге.
+        let text = #"""
+        {"sections":[
+          {"title":"T","kind":"albums","category":"whatever","albumIds":["A1","ZZZ"]}
+        ]}
+        """#
+        let feed = try HomeFeedParser.parse(text, validAlbumIds: valid)
+        #expect(feed.sections[0].albumIds == ["A1"])
+        #expect(feed.sections[0].category == "whatever")
+    }
+}
+
+/// Обратная совместимость дискового кэша `homefeed.json`: старый формат без
+/// `category` читается, новый (со слагом) ходит по кругу encode → decode.
+@Suite struct HomeFeedCacheCompatibilityTests {
+    @Test func legacyCacheWithoutCategoryDecodes() throws {
+        let legacy = #"""
+        {"sections":[
+          {"title":"Ночь","subtitle":"тьма","tags":["ночь"],"kind":"albums","albumIds":["A1"]},
+          {"title":"Скачать","subtitle":null,"kind":"external",
+           "items":[{"artist":"X","album":"Y","year":2004,"reason":"зайдёт"}]}
+        ]}
+        """#
+        let feed = try JSONDecoder().decode(HomeFeed.self, from: Data(legacy.utf8))
+        #expect(feed.sections.count == 2)
+        #expect(feed.sections[0].category == nil)
+        #expect(feed.sections[1].category == nil)
+    }
+
+    @Test func categoryRoundTripsThroughCodable() throws {
+        let feed = HomeFeed(sections: [
+            HomeSection(
+                title: "Копни",
+                subtitle: nil,
+                tags: nil,
+                kind: .external,
+                category: "dig-deeper",
+                albumIds: nil,
+                items: [ExternalItem(artist: "X", album: "Y", year: nil, reason: "r")]
+            ),
+        ])
+        let data = try JSONEncoder().encode(feed)
+        let decoded = try JSONDecoder().decode(HomeFeed.self, from: data)
+        #expect(decoded == feed)
+        #expect(decoded.sections[0].category == "dig-deeper")
+    }
 }

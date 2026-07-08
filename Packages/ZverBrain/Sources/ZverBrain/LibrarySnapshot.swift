@@ -51,6 +51,27 @@ public struct LibrarySnapshot: Sendable, Equatable {
         }
     }
 
+    /// Фидбек по внешним рекомендациям — зеркало `ZverCore.RecFeedback`
+    /// (пакет автономен, зависимость на ZverCore не заводим). Все списки —
+    /// строки «Артист — Альбом», уже отсортированные вызывающим.
+    public struct RecFeedback: Sendable, Equatable {
+        /// Отмеченные ♥ — направления можно смело развивать.
+        public let liked: [String]
+        /// Скрытые «Не моё» — анти-сигнал.
+        public let hidden: [String]
+        /// Всё показанное за окно (жёсткий запрет повтора).
+        public let recentlyShown: [String]
+
+        public init(liked: [String] = [], hidden: [String] = [], recentlyShown: [String] = []) {
+            self.liked = liked
+            self.hidden = hidden
+            self.recentlyShown = recentlyShown
+        }
+
+        /// Пустой фидбек — дефолт для старых вызовов и первых запусков.
+        public static let empty = RecFeedback()
+    }
+
     /// Все альбомы библиотеки (уже обрезанные вызывающим до бюджета промпта).
     public let albums: [AlbumEntry]
     /// Топ-артисты по прослушиваниям (по убыванию).
@@ -65,6 +86,17 @@ public struct LibrarySnapshot: Sendable, Equatable {
     public let recentlyPlayedIds: [String]
     /// Id недавно добавленных альбомов (свежие — первыми).
     public let recentlyAddedIds: [String]
+    /// «Одержимости»: строки «Артист — Альбом» с аномальной плотностью
+    /// прослушиваний за последние ~14 дней — якорь для `similar-to-obsession`.
+    public let obsessions: [String]
+    /// Артисты, которых слушатель систематически скипает
+    /// (`playEvent.endReason == 'skipped'`) — анти-сигнал.
+    public let skippedArtists: [String]
+    /// Фидбек по уже показанным рекомендациям (♥ / «не моё» / показанное).
+    public let recFeedback: RecFeedback
+    /// Скелет похожести от Deezer: топ-артисты слушателя → родственные артисты
+    /// по данным слушателей Deezer. Порядок ключей не важен — промпт сортирует.
+    public let similarArtistsHints: [String: [String]]
 
     public init(
         albums: [AlbumEntry],
@@ -73,7 +105,11 @@ public struct LibrarySnapshot: Sendable, Equatable {
         favoriteAlbumIds: [String],
         favoriteTrackTitles: [String],
         recentlyPlayedIds: [String],
-        recentlyAddedIds: [String]
+        recentlyAddedIds: [String],
+        obsessions: [String] = [],
+        skippedArtists: [String] = [],
+        recFeedback: RecFeedback = .empty,
+        similarArtistsHints: [String: [String]] = [:]
     ) {
         self.albums = albums
         self.topArtists = topArtists
@@ -82,6 +118,10 @@ public struct LibrarySnapshot: Sendable, Equatable {
         self.favoriteTrackTitles = favoriteTrackTitles
         self.recentlyPlayedIds = recentlyPlayedIds
         self.recentlyAddedIds = recentlyAddedIds
+        self.obsessions = obsessions
+        self.skippedArtists = skippedArtists
+        self.recFeedback = recFeedback
+        self.similarArtistsHints = similarArtistsHints
     }
 
     /// Множество валидных id альбомов — для ``HomeFeedParser`` (отсев галлюцинаций).

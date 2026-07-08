@@ -18,6 +18,28 @@ import Foundation
         #expect(infos.allSatisfy { ["flac", "m4a"].contains($0.url.pathExtension) })
         #expect(infos.map(\.url.path) == infos.map(\.url.path).sorted())
     }
+    @Test func skipsDocumentsInboxDirectory() async throws {
+        // `Documents/Inbox` — системная папка Open-in/AirDrop: сюда iOS кладёт файлы,
+        // открытые через «Скопировать в Zver» (не in-place). Это ещё не разложенное
+        // сырьё (его разбирает AlbumImporter в `Library/`), поэтому скан библиотеки
+        // его игнорирует — иначе недоимпортированный файл засветился бы в библиотеке.
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        let inbox = tmp.appendingPathComponent("Inbox")
+        let album = tmp.appendingPathComponent("Library/Альбом")
+        try FileManager.default.createDirectory(at: inbox, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: album, withIntermediateDirectories: true)
+        let fm = FileManager.default
+        // Сырьё во «входящих» — попасть в скан НЕ должно.
+        try fm.copyItem(at: fixture("tagged_16_44.flac"), to: inbox.appendingPathComponent("raw.flac"))
+        // Разложенный альбом в библиотеке — попасть должен.
+        try fm.copyItem(at: fixture("notags.flac"), to: album.appendingPathComponent("01.flac"))
+
+        let infos = try await LibraryScanner.scan(directory: tmp)
+        #expect(infos.count == 1)
+        #expect(infos.first?.url.lastPathComponent == "01.flac")
+        #expect(!infos.contains { $0.url.path.contains("/Inbox/") })
+    }
     @Test func scanThrowsWhenDirectoryMissing() async {
         // Сбой перечисления корня (директории нет/нечитаема) — реальная
         // ошибка, а не «пустая библиотека»: иначе сверка с каталогом

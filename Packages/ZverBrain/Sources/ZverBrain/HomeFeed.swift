@@ -34,6 +34,12 @@ public struct HomeSection: Codable, Equatable, Sendable {
     public let tags: [String]?
     /// Вид секции.
     public let kind: Kind
+    /// Слаг категории discovery (см. ``DiscoveryCategory``) — эхо от модели для
+    /// external-секций: нужен ротации, фидбек-метрикам и UI. Опционален ради
+    /// обратной совместимости: старый кэш `homefeed.json` и ответы без слага
+    /// декодятся в `nil` (секция живёт без категории). Тип — String, а не enum:
+    /// незнакомый слаг от модели не должен ронять декод всей ленты.
+    public let category: String?
     /// Id альбомов библиотеки — только для `kind == .albums`.
     public let albumIds: [String]?
     /// Внешние рекомендации — только для `kind == .external`.
@@ -44,6 +50,7 @@ public struct HomeSection: Codable, Equatable, Sendable {
         subtitle: String?,
         tags: [String]?,
         kind: Kind,
+        category: String? = nil,
         albumIds: [String]?,
         items: [ExternalItem]?
     ) {
@@ -51,6 +58,7 @@ public struct HomeSection: Codable, Equatable, Sendable {
         self.subtitle = subtitle
         self.tags = tags
         self.kind = kind
+        self.category = category
         self.albumIds = albumIds
         self.items = items
     }
