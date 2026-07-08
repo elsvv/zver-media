@@ -211,6 +211,68 @@ import Foundation
         #expect(decoded.contains("Björk"))
     }
 
+    // MARK: - Windows-1251 (кириллица)
+
+    @Test func readTextDecodesWindows1251Cyrillic() throws {
+        // Рус./укр. EAC-рип: `.cue` в Windows-1251. UTF-8 на этих байтах падает;
+        // жадный 1252 «успешно» декодировал бы их в кракозябры — нужен 1251.
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString + ".cue")
+        let text = "PERFORMER \"5'nizza\"\nTITLE \"Пятница\"\n"
+        try #require(text.data(using: .windowsCP1251)).write(to: tmp)
+
+        #expect(String(data: try Data(contentsOf: tmp), encoding: .utf8) == nil) // UTF-8 падает
+        #expect(LibraryScanner.readText(tmp) == text)
+    }
+
+    @Test func readTextDecodesWesternLatin1NotAsCyrillic() throws {
+        // Западный cue в 1252 с рядом стоящими акцентами (нем. `üß` → в 1251 «юя»):
+        // одиночная серия из 2 кириллических — НЕ доказательство кириллицы (порог ≥3),
+        // поэтому берётся 1252 и западный текст читается корректно, а не как кириллица.
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString + ".cue")
+        let text = "TITLE \"Grüße\"\nTITLE \"Straße\"\n"
+        try #require(text.data(using: .windowsCP1252)).write(to: tmp)
+
+        #expect(String(data: try Data(contentsOf: tmp), encoding: .utf8) == nil) // UTF-8 падает
+        let decoded = try #require(LibraryScanner.readText(tmp))
+        #expect(decoded.contains("Grüße"))
+        #expect(decoded.contains("Straße"))
+    }
+
+    @Test func scanDecodesWindows1251CueAndMatchesCyrillicFileName() async throws {
+        // Регресс на баг: рус./укр. образ «весь CD одним .flac + .cue» в Windows-1251.
+        // Раньше cue декодировался жадным 1252 → имя в директиве FILE (кириллица)
+        // превращалось в кракозябры и НЕ совпадало с реальным .flac → образ не
+        // раскрывался и весь альбом виделся ОДНИМ треком. Теперь 1251 декодируется,
+        // имя FILE совпадает с файлом на диске, образ раскрывается в N треков.
+        let root = try makeAlbum(named: "5'nizza - Пятница (2003)")
+        let flac = root.appendingPathComponent("5'nizza - Пятница.flac")
+        try FileManager.default.copyItem(at: fixture(Self.container), to: flac)
+        let cueText = """
+        PERFORMER "5'nizza"
+        TITLE "Пятница"
+        FILE "5'nizza - Пятница.flac" WAVE
+          TRACK 01 AUDIO
+            TITLE "Сюрная"
+            INDEX 01 00:00:00
+          TRACK 02 AUDIO
+            TITLE "Я не той..."
+            INDEX 01 00:03:00
+          TRACK 03 AUDIO
+            TITLE "Big Badda Boom"
+            INDEX 01 00:05:00
+        """
+        try #require(cueText.data(using: .windowsCP1251))
+            .write(to: root.appendingPathComponent("5'nizza - Пятница.cue"))
+
+        let infos = try await LibraryScanner.scan(directory: root.deletingLastPathComponent())
+        #expect(infos.count == 3)
+        let sorted = infos.sorted { ($0.cueIndex ?? 0) < ($1.cueIndex ?? 0) }
+        #expect(sorted.map(\.cueIndex) == [1, 2, 3])
+        #expect(sorted.map(\.title) == ["Сюрная", "Я не той...", "Big Badda Boom"])
+    }
+
     @Test func scanDecodesShiftJISCueTitles() async throws {
         let root = try makeAlbum(named: "日本盤")
         let flac = root.appendingPathComponent("album.flac")
