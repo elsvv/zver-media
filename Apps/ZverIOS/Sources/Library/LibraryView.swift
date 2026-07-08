@@ -1,94 +1,106 @@
 import SwiftUI
 import ZverCore
 
-/// Корневой экран «Библиотека» (как в Apple Music): разделы
-/// Плейлисты, Артисты, Альбомы, Песни, ниже — грид «Недавно добавленные».
-/// Здесь же — первичная загрузка библиотеки и pull-to-refresh.
+/// Корневой экран «Библиотека» (как в Apple Music): карточка разделов
+/// (Плейлисты, Артисты, Альбомы, Песни, Избранное), ниже — горизонтальная
+/// карусель «Добавленные» (с «Показать все»). Здесь же — первичная загрузка
+/// библиотеки и pull-to-refresh.
+///
+/// Экран — `ScrollView`, а не `List`: раньше «Недавно добавленные» жили гридом
+/// `LazyVGrid` внутри `List`-строки, и `NavigationLink` внутри такого грида
+/// открывал НЕ ТОТ альбом и ломал стек навигации (баг ленивого грида в List).
+/// В `ScrollView` (как на «Главной») closure-`NavigationLink` работает корректно.
 struct LibraryView: View {
     @ObservedObject var store: LibraryStore
     @ObservedObject var engine: PlayerEngine
 
-    private static let gridColumns = [
-        GridItem(.flexible(), spacing: 16),
-        GridItem(.flexible(), spacing: 16),
-    ]
-
-    /// Сколько плиток «Недавно добавленных» на корневом экране
-    /// (полный список — по «Показать все»).
-    private static let recentLimit = 12
+    /// Сколько «Добавленных» показываем в карусели (полный список — по «Показать все»).
+    private static let recentLimit = 15
 
     var body: some View {
-        List {
-            Section {
-                NavigationLink {
-                    PlaylistsView(store: store, engine: engine)
-                } label: {
-                    Label("Плейлисты", systemImage: "music.note.list")
-                }
-                NavigationLink {
-                    ArtistsView(store: store, engine: engine)
-                } label: {
-                    Label("Артисты", systemImage: "music.mic")
-                }
-                NavigationLink {
-                    AlbumsGridView(title: "Альбомы", albums: store.albums,
-                                   store: store, engine: engine)
-                } label: {
-                    Label("Альбомы", systemImage: "square.stack")
-                }
-                NavigationLink {
-                    SongsView(store: store, engine: engine)
-                } label: {
-                    Label("Песни", systemImage: "music.note")
-                }
-                NavigationLink {
-                    FavoritesView(store: store, engine: engine)
-                } label: {
-                    Label("Избранное", systemImage: "heart")
-                }
-            }
+        ScrollView {
+            VStack(alignment: .leading, spacing: 28) {
+                categoriesCard
 
-            if !recentAlbums.isEmpty {
-                Section {
-                    // Грид живёт одним рядом списка на прозрачном фоне: сверху —
-                    // нативные ряды категорий, ниже — плитки как в «Альбомах».
-                    LazyVGrid(columns: Self.gridColumns, spacing: 20) {
-                        ForEach(recentAlbums.prefix(Self.recentLimit)) { group in
-                            NavigationLink {
-                                AlbumDetailView(group: group, store: store, engine: engine)
-                            } label: {
-                                AlbumTile(group: group, loader: engine.artworkLoader)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                    .listRowInsets(EdgeInsets(top: 8, leading: 0, bottom: 8, trailing: 0))
-                    .listRowSeparator(.hidden)
-                    .listRowBackground(Color.clear)
-                } header: {
-                    HStack(alignment: .firstTextBaseline) {
-                        Text("Недавно добавленные")
-                            .font(.title3.weight(.semibold))
-                            .foregroundStyle(.primary)
-                        Spacer()
-                        NavigationLink {
-                            AlbumsGridView(title: "Недавно добавленные",
-                                           albums: recentAlbums,
-                                           store: store, engine: engine)
-                        } label: {
-                            Text("Показать все")
-                                .font(.subheadline)
-                        }
-                    }
-                    .textCase(nil)
+                if !recentAlbums.isEmpty {
+                    AlbumCarousel(title: "Добавленные",
+                                  albums: Array(recentAlbums.prefix(Self.recentLimit)),
+                                  allAlbums: recentAlbums,
+                                  store: store, engine: engine)
                 }
             }
+            .padding(.vertical, 12)
         }
-        .listStyle(.insetGrouped)
+        .background(Color(.systemGroupedBackground).ignoresSafeArea())
         .navigationTitle("Библиотека")
         .task { await store.refresh() }
         .refreshable { await store.refresh() }
     }
+
+    // MARK: - Карточка разделов
+
+    /// Разделы библиотеки одной сгруппированной карточкой (вид как у
+    /// `.insetGrouped`-списка, но в `ScrollView` — без бага навигации).
+    private var categoriesCard: some View {
+        VStack(spacing: 0) {
+            categoryRow("Плейлисты", "music.note.list") {
+                PlaylistsView(store: store, engine: engine)
+            }
+            rowDivider
+            categoryRow("Артисты", "music.mic") {
+                ArtistsView(store: store, engine: engine)
+            }
+            rowDivider
+            categoryRow("Альбомы", "square.stack") {
+                AlbumsGridView(title: "Альбомы", albums: store.albums,
+                               store: store, engine: engine)
+            }
+            rowDivider
+            categoryRow("Песни", "music.note") {
+                SongsView(store: store, engine: engine)
+            }
+            rowDivider
+            categoryRow("Избранное", "heart") {
+                FavoritesView(store: store, engine: engine)
+            }
+        }
+        .background(Color(.secondarySystemGroupedBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .padding(.horizontal, 16)
+    }
+
+    /// Разделитель между строками, отбитый под иконку (как в системном списке).
+    private var rowDivider: some View {
+        Divider().padding(.leading, 56)
+    }
+
+    private func categoryRow<Destination: View>(
+        _ title: String, _ icon: String,
+        @ViewBuilder destination: @escaping () -> Destination
+    ) -> some View {
+        NavigationLink {
+            destination()
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: icon)
+                    .font(.body)
+                    .foregroundStyle(.tint)
+                    .frame(width: 28, alignment: .center)
+                Text(title)
+                    .foregroundStyle(.primary)
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.forward")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: - Данные
 
     /// Альбомы по свежести добавления: recency папки = максимальный `addedAt`
     /// её треков (доимпорт трека «поднимает» альбом). Треки без даты — защитный

@@ -21,6 +21,21 @@ private func makeTrack(title: String, artist: String? = nil, album: String? = ni
 }
 
 @Suite struct AlbumGroupTests {
+    @Test func hashableByIdEnablesValueBasedNavigation() {
+        // Value-based навигация SwiftUI требует Hashable. Хэшируем по id (путь папки):
+        // согласован с синтезированным ==, разные альбомы различимы в Set/пути стека.
+        let a = AlbumGroup(id: "/music/A", album: "A", artist: nil,
+                           tracks: [makeTrack(title: "t", album: "A")])
+        let aSame = AlbumGroup(id: "/music/A", album: "A", artist: nil,
+                               tracks: [makeTrack(title: "t", album: "A")])
+        let b = AlbumGroup(id: "/music/B", album: "B", artist: nil,
+                           tracks: [makeTrack(title: "t", album: "B")])
+
+        #expect(a == aSame)                       // равны по значению…
+        #expect(a.hashValue == aSame.hashValue)   // …и по хэшу (контракт Hashable)
+        #expect(Set([a, aSame, b]).count == 2)    // разные id → разные элементы
+    }
+
     @Test func groupsTracksByAlbumSortedByTrackNumber() {
         // Перемешанный вход: два альбома + трек без альбома
         let tracks = [

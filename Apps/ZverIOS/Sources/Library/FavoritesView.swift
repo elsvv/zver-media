@@ -19,9 +19,11 @@ struct FavoritesView: View {
                 Section {
                     LazyVGrid(columns: Self.gridColumns, spacing: 20) {
                         ForEach(store.favoriteAlbums) { group in
-                            NavigationLink {
-                                AlbumDetailView(group: group, store: store, engine: engine)
-                            } label: {
+                            // Value-based навигация: closure-`NavigationLink` внутри
+                            // `LazyVGrid` в `List`-строке открывал НЕ ТОТ альбом и ломал
+                            // стек. `NavigationLink(value:)` + `navigationDestination`
+                            // резолвят пункт назначения стеком по значению — баг уходит.
+                            NavigationLink(value: group) {
                                 AlbumTile(group: group, loader: engine.artworkLoader)
                             }
                             .buttonStyle(.plain)
@@ -57,6 +59,9 @@ struct FavoritesView: View {
         }
         .listStyle(.insetGrouped)
         .navigationTitle("Избранное")
+        .navigationDestination(for: AlbumGroup.self) { group in
+            AlbumDetailView(group: group, store: store, engine: engine)
+        }
         .overlay {
             if store.favoriteAlbums.isEmpty && store.favoriteTracks.isEmpty {
                 ContentUnavailableView(

@@ -6,7 +6,7 @@ import Foundation
 /// две оцифровки одной пластинки в разных папках остаются разными альбомами, даже
 /// если тег ALBUM у них совпадает (иначе версии сливались бы и терялись). `id` —
 /// путь папки; `album` — отображаемое название (по тегу, см. `group`).
-public struct AlbumGroup: Identifiable, Equatable, Sendable {
+public struct AlbumGroup: Identifiable, Equatable, Hashable, Sendable {
     public static let noAlbumTitle = "Без альбома"
 
     public let id: String          // стабильный ключ: путь папки (или noAlbumTitle)
@@ -19,6 +19,14 @@ public struct AlbumGroup: Identifiable, Equatable, Sendable {
         self.album = album
         self.artist = artist
         self.tracks = tracks
+    }
+
+    /// Хэш по `id` (путь папки-альбома уникален). Нужен для value-based навигации
+    /// SwiftUI (`NavigationLink(value:)` + `navigationDestination`), которой мы
+    /// чиним баг «тап по плитке в гриде внутри List открывает не тот альбом».
+    /// Согласован с синтезированным `==`: равные группы имеют равный `id` → равный хэш.
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
     }
 
     /// Одна дисковая секция альбома: номер, метка и его треки (в порядке трека).
