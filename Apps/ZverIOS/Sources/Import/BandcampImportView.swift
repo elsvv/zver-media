@@ -12,11 +12,23 @@ import ZverImport
 /// переживает уход с экрана назад.
 struct BandcampImportView: View {
     @ObservedObject var center: WebDownloadCenter
+    /// Мост «Найти на Bandcamp»: отсюда забираем поисковый URL рекомендации.
+    /// Экран — единственный потребитель: загрузил и обнулил.
+    @ObservedObject var router: ImportRouter
     @StateObject private var navigator = WebNavigator()
 
     var body: some View {
         BandcampWebView(navigator: navigator, center: center)
             .ignoresSafeArea(.container, edges: .bottom)
+            // Поисковый URL моста: и при пуше экрана (у @Published подписка
+            // отдаёт текущее значение), и когда экран уже открыт. Обнуляем
+            // отложенно — onReceive может сработать в момент установки
+            // подписки, прямо во время рендера.
+            .onReceive(router.$pendingBandcampSearch) { url in
+                guard let url else { return }
+                navigator.load(url)
+                Task { @MainActor in router.pendingBandcampSearch = nil }
+            }
             .navigationTitle("Bandcamp")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -54,9 +66,28 @@ final class WebNavigator: ObservableObject {
 
     weak var webView: WKWebView?
 
+    /// URL, отложенный до создания вьюхи (мост «Найти на Bandcamp» пушит экран
+    /// раньше, чем `makeUIView` создаст webview). Забирается в `initialURL`.
+    private var pendingURL: URL?
+
     func goBack() { webView?.goBack() }
     func goForward() { webView?.goForward() }
     func goHome() { webView?.load(URLRequest(url: home)) }
+
+    /// Загружает URL; вьюхи ещё нет — откладывает его до `makeUIView`.
+    func load(_ url: URL) {
+        if let webView {
+            webView.load(URLRequest(url: url))
+        } else {
+            pendingURL = url
+        }
+    }
+
+    /// Стартовый URL для `makeUIView`: отложенный поисковый (мост) или домашняя.
+    func initialURL() -> URL {
+        defer { pendingURL = nil }
+        return pendingURL ?? home
+    }
 
     /// Синхронизирует доступность кнопок с состоянием вьюхи (после каждого перехода).
     func sync() {
@@ -84,7 +115,7 @@ struct BandcampWebView: UIViewRepresentable {
         webView.navigationDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = true
         navigator.webView = webView
-        webView.load(URLRequest(url: navigator.home))
+        webView.load(URLRequest(url: navigator.initialURL()))
         return webView
     }
 

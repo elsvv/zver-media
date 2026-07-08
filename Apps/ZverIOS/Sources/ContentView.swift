@@ -22,6 +22,17 @@ struct ContentView: View {
     // в настройках; лента генерируется вручную и кэшируется на диске.
     @StateObject private var brain: BrainProfilesStore
     @StateObject private var homeFeed: HomeFeedService
+    // Мост «Найти на Bandcamp» из шита рекомендации: URL поиска едет через
+    // роутер во вкладку «Импорт» (ImportHomeView → BandcampImportView).
+    @StateObject private var importRouter = ImportRouter()
+
+    /// Вкладки таб-бара. Selection нужен мосту «Найти на Bandcamp»: шит
+    /// рекомендации программно переключает на «Импорт».
+    private enum Tab: Hashable {
+        case home, library, search, importer, settings
+    }
+
+    @State private var selectedTab: Tab = .home
 
     /// Плашка-баннер после системного «Открыть в Zver Media» (импорт из
     /// Safari/Files/AirDrop). nil — баннера нет. Гаснет сам через несколько секунд
@@ -80,13 +91,20 @@ struct ContentView: View {
     }
 
     var body: some View {
-        TabView {
+        TabView(selection: $selectedTab) {
             NavigationStack {
                 HomeView(store: library, engine: engine,
-                         feedService: homeFeed, profiles: brain)
+                         feedService: homeFeed, profiles: brain,
+                         findOnBandcamp: { url in
+                             // Мост из шита рекомендации: URL — роутеру,
+                             // сами — на вкладку «Импорт».
+                             importRouter.pendingBandcampSearch = url
+                             selectedTab = .importer
+                         })
             }
             .safeAreaInset(edge: .bottom, spacing: 0) { miniPlayer }
             .tabItem { Label("Главная", systemImage: "house") }
+            .tag(Tab.home)
 
             NavigationStack {
                 LibraryView(store: library, engine: engine)
@@ -97,12 +115,14 @@ struct ContentView: View {
             // inset нельзя — лёг бы ПОД таб-баром.
             .safeAreaInset(edge: .bottom, spacing: 0) { miniPlayer }
             .tabItem { Label("Библиотека", systemImage: "music.note.list") }
+            .tag(Tab.library)
 
             NavigationStack {
                 SearchView(store: library, engine: engine)
             }
             .safeAreaInset(edge: .bottom, spacing: 0) { miniPlayer }
             .tabItem { Label("Поиск", systemImage: "magnifyingglass") }
+            .tag(Tab.search)
 
             NavigationStack {
                 // Селектор источников импорта (Мак / Bandcamp / IA / Из файлов).
@@ -110,10 +130,12 @@ struct ContentView: View {
                 // sidecar + новые треки) с последующим автобэкапом; раздаётся
                 // источникам. showBanner — общая плашка-итог поверх табов.
                 ImportHomeView(rescan: { await refreshAndBackup() },
-                               showBanner: { text in showBanner(text) })
+                               showBanner: { text in showBanner(text) },
+                               router: importRouter)
             }
             .safeAreaInset(edge: .bottom, spacing: 0) { miniPlayer }
             .tabItem { Label("Импорт", systemImage: "square.and.arrow.down") }
+            .tag(Tab.importer)
 
             NavigationStack {
                 SettingsView(account: account, store: library, backup: backup,
@@ -121,6 +143,7 @@ struct ContentView: View {
             }
             .safeAreaInset(edge: .bottom, spacing: 0) { miniPlayer }
             .tabItem { Label("Настройки", systemImage: "gearshape") }
+            .tag(Tab.settings)
         }
         // Системное «Открыть в Zver Media»: файл из Safari/Files/AirDrop/почты →
         // staging-копия → AlbumImporter → баннер → рескан библиотеки.

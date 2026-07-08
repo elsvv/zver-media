@@ -17,6 +17,11 @@ struct ImportHomeView: View {
     let rescan: @MainActor () async -> Void
     let showBanner: @MainActor (String) -> Void
 
+    /// Мост «Найти на Bandcamp» из шита рекомендации («Главная»): появление
+    /// `pendingBandcampSearch` пушит Bandcamp-экран; сам URL загружает и
+    /// обнуляет `BandcampImportView`. Владелец роутера — `ContentView`.
+    @ObservedObject var router: ImportRouter
+
     /// Владелец скачиваний webview (Bandcamp): живёт на уровне стека «Импорта», а не
     /// вкладки webview, — плашка прогресса видна отсюда, из селектора, и переживает
     /// уход с экрана Bandcamp назад в список.
@@ -28,11 +33,17 @@ struct ImportHomeView: View {
 
     @State private var isPickingFiles = false
     @State private var isImporting = false
+    /// Bandcamp-экран открыт (пуш и по тапу, и мостом из «Главной»). Единый
+    /// `navigationDestination` — экран не задваивается, когда мост срабатывает
+    /// при уже открытом Bandcamp.
+    @State private var isBandcampOpen = false
 
     init(rescan: @escaping @MainActor () async -> Void,
-         showBanner: @escaping @MainActor (String) -> Void) {
+         showBanner: @escaping @MainActor (String) -> Void,
+         router: ImportRouter) {
         self.rescan = rescan
         self.showBanner = showBanner
+        self.router = router
         _downloadCenter = StateObject(
             wrappedValue: WebDownloadCenter(rescan: rescan, showBanner: showBanner))
         _archiveCenter = StateObject(
@@ -48,8 +59,10 @@ struct ImportHomeView: View {
                     sourceRow("С Мака", systemImage: "laptopcomputer.and.arrow.down",
                               subtitle: "Альбомы из очереди на Маке по Wi-Fi")
                 }
-                NavigationLink {
-                    BandcampImportView(center: downloadCenter)
+                // Кнопка, а не NavigationLink: тот же экран пушится и мостом
+                // «Найти на Bandcamp» из «Главной» (см. navigationDestination).
+                Button {
+                    isBandcampOpen = true
                 } label: {
                     sourceRow("Bandcamp", systemImage: "cart",
                               subtitle: "Купленные и бесплатные релизы во FLAC")
@@ -75,6 +88,15 @@ struct ImportHomeView: View {
             }
         }
         .navigationTitle("Импорт")
+        .navigationDestination(isPresented: $isBandcampOpen) {
+            BandcampImportView(center: downloadCenter, router: router)
+        }
+        // Мост из «Главной»: поисковый URL появился — открываем Bandcamp-экран
+        // (если уже открыт — он сам подхватит URL через свой onReceive).
+        .onReceive(router.$pendingBandcampSearch) { url in
+            guard url != nil else { return }
+            isBandcampOpen = true
+        }
         .fileImporter(
             isPresented: $isPickingFiles,
             allowedContentTypes: [.zip, .audio],

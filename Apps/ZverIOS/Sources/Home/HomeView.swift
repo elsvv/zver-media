@@ -11,6 +11,10 @@ struct HomeView: View {
     @ObservedObject var engine: PlayerEngine
     @ObservedObject var feedService: HomeFeedService
     @ObservedObject var profiles: BrainProfilesStore
+    /// Мост «Найти на Bandcamp» (шит рекомендации): передаёт поисковый URL
+    /// наверх — `ContentView` кладёт его в `ImportRouter` и переключает таб
+    /// на «Импорт».
+    let findOnBandcamp: @MainActor (URL) -> Void
 
     @State private var recentlyPlayed: [AlbumGroup] = []
     @State private var confirmsRefresh = false
@@ -58,7 +62,8 @@ struct HomeView: View {
             Text("Статистика прослушивания уйдёт выбранной модели, это потратит токены API.")
         }
         .sheet(item: $selectedSuggestion) { suggestion in
-            ExternalSuggestionSheet(suggestion: suggestion, feedService: feedService)
+            ExternalSuggestionSheet(suggestion: suggestion, feedService: feedService,
+                                    findOnBandcamp: findOnBandcamp)
         }
     }
 
@@ -328,6 +333,9 @@ extension ITunesCatalog {
 struct ExternalSuggestionSheet: View {
     let suggestion: ExternalSuggestion
     @ObservedObject var feedService: HomeFeedService
+    /// Мост к импорту: поисковый URL Bandcamp уходит наверх (`ContentView` →
+    /// `ImportRouter`), шит закрывается, открывается вкладка «Импорт».
+    let findOnBandcamp: @MainActor (URL) -> Void
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
@@ -377,6 +385,7 @@ struct ExternalSuggestionSheet: View {
 
                 feedbackRow
                 openInSection
+                bandcampBridgeButton
 
                 Label("Найди и закинь через Mac-синк — появится в библиотеке",
                       systemImage: "laptopcomputer.and.arrow.down")
@@ -452,10 +461,6 @@ struct ExternalSuggestionSheet: View {
     /// подъехали (иконка меняется на link), иначе поисковые URL
     /// (`ExternalLinks`, без сети и ключей); YouTube — всегда поиск.
     /// Tidal/Deezer — бонусные кнопки, только с точной ссылкой.
-    // TODO: мост к импорту — кнопка «Найти на Bandcamp», открывающая
-    // Bandcamp-экран вкладки «Импорт» с поисковым URL. Зависит от параллельной
-    // ветки feat/external-import — см. docs/plans/2026-07-07-discovery-v2-design.md
-    // («Этап 2 — мост к импорту»).
     private var openInSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Открыть в…")
@@ -506,6 +511,23 @@ struct ExternalSuggestionSheet: View {
             Label(title, systemImage: systemImage)
                 .font(.subheadline)
                 .lineLimit(1)
+                .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.bordered)
+    }
+
+    // MARK: - Мост к импорту
+
+    /// «Найти на Bandcamp»: закрывает шит, переключает на вкладку «Импорт» и
+    /// открывает встроенный Bandcamp с поисковым URL релиза (петля: рекомендация
+    /// → $0/покупка → FLAC в библиотеке → сигнал owned).
+    private var bandcampBridgeButton: some View {
+        Button {
+            findOnBandcamp(ExternalLinks.bandcamp(artist: suggestion.artist,
+                                                  album: suggestion.album))
+            dismiss()
+        } label: {
+            Label("Найти на Bandcamp", systemImage: "square.and.arrow.down")
                 .frame(maxWidth: .infinity)
         }
         .buttonStyle(.bordered)
